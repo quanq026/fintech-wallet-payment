@@ -32,13 +32,15 @@ class WalletConsoleRecoveryIntegrationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     @Test
-    void threeAccountConsolesObserveTransfersAndPaymentsWithoutInput(@TempDir Path directory) throws Exception {
+    void threeAccountConsolesShowIncomeForAnUnselectedWallet(@TempDir Path directory) throws Exception {
         WalletApiClient api = new WalletApiClient();
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String alice = "live-alice-" + suffix, bob = "live-bob-" + suffix, merchant = "live-shop-" + suffix;
+        String bobSelected = "live-bob-other-" + suffix;
         var wallets = List.of(Map.of("accountId", alice, "ownerId", "alice", "kind", "USER"),
                 Map.of("accountId", bob, "ownerId", "bob", "kind", "USER"),
-                Map.of("accountId", merchant, "ownerId", "admin", "kind", "MERCHANT"));
+                Map.of("accountId", merchant, "ownerId", "admin", "kind", "MERCHANT"),
+                Map.of("accountId", bobSelected, "ownerId", "bob", "kind", "USER"));
         for (var wallet : wallets) request(api, "admin", "POST", "/api/accounts", wallet, null);
         Response clearing = api.request("admin", "POST", "/api/accounts",
                 Map.of("accountId", "bank-clearing", "ownerId", "admin", "kind", "CLEARING"), null);
@@ -49,7 +51,7 @@ class WalletConsoleRecoveryIntegrationTest {
         awaitCompleted(api, "alice", "/api/payments/" + deposit.path("id").asText());
         Path legacy = directory.resolve("console-wallets.json");
         JSON.writeValue(legacy.toFile(), Map.of("user", "alice", "wallets", wallets,
-                "selected", Map.of("alice", alice, "bob", bob, "admin", merchant)));
+                "selected", Map.of("alice", alice, "bob", bobSelected, "admin", merchant)));
 
         var inputs = new ArrayList<PipedInputStream>();
         var writers = new ArrayList<PipedOutputStream>();
@@ -68,17 +70,19 @@ class WalletConsoleRecoveryIntegrationTest {
             }
             for (var output : outputs) awaitOutput(output, "Chọn số > ");
             assertTrue(outputs.stream().noneMatch(output -> output.toString(StandardCharsets.UTF_8).contains("Đã khóa gửi tiền")));
-            writers.get(0).write("3\n1\n1000\n1\n\n".getBytes(StandardCharsets.UTF_8));
+            writers.get(0).write("3\n1\n2000\n1\n\n".getBytes(StandardCharsets.UTF_8));
             writers.get(0).flush();
-            awaitOutput(outputs.get(1), "Số dư ví " + bob + ": 1.000 VND");
-            awaitOutput(outputs.get(0), "Số dư hiện tại: 9.000 VND");
+            awaitOutput(outputs.get(1), "Nhận 2.000 VND vào ví " + bob);
+            awaitOutput(outputs.get(1), "ví đang mở: " + bobSelected);
+            awaitOutput(outputs.get(0), "Số dư hiện tại: 8.000 VND");
+            assertEquals(0, balance(api, "bob", bobSelected));
 
             writers.get(0).write("4\n1\n1\n500\n1\n\n".getBytes(StandardCharsets.UTF_8));
             writers.get(0).flush();
             awaitOutput(outputs.get(2), "Số dư ví " + merchant + ": 500 VND");
-            awaitOutput(outputs.get(0), "Số dư hiện tại: 8.500 VND");
-            assertEquals(8_500, balance(api, "alice", alice));
-            assertEquals(1_000, balance(api, "bob", bob));
+            awaitOutput(outputs.get(0), "Số dư hiện tại: 7.500 VND");
+            assertEquals(7_500, balance(api, "alice", alice));
+            assertEquals(2_000, balance(api, "bob", bob));
             assertEquals(500, balance(api, "admin", merchant));
         } finally {
             for (var writer : writers) {

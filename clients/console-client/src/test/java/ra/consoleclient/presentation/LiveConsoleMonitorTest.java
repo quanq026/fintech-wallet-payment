@@ -9,6 +9,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -175,6 +176,165 @@ class LiveConsoleMonitorTest {
         }
     }
 
+    @Test
+    void incomingToAnotherWalletAfterPrimingAppearsOnceWithoutChangingSelectedBalance() throws Exception {
+        FakeClient client = new FakeClient((user, path) -> account("bob-live", 20_000));
+        var history = event(10, "alice", "bob", "bob-old", 1_000);
+        client.notificationResponse.set(notifications(history));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (var monitor = monitor(client, output)) {
+            monitor.primeNotifications("bob");
+            assertEquals("", output.toString(StandardCharsets.UTF_8));
+            monitor.seedBalance("bob", "bob-live", 20_000);
+            client.notificationResponse.set(notifications(event(12, "bob", "alice", "alice-live", 3_000),
+                    event(11, "alice", "bob", "bob-demo", 2_000),
+                    event(11, "alice", "bob", "bob-demo", 2_000), history));
+            monitor.setContext("bob", "bob-live", PROMPT, true);
+            monitor.pollOnce();
+            String received = output.toString(StandardCharsets.UTF_8);
+            assertTrue(received.contains("Nhận 2.000 VND vào ví bob-demo từ ví alice-live (ví đang mở: bob-live)"));
+            assertFalse(received.contains("1.000 VND"));
+            assertFalse(received.contains("3.000 VND"));
+            assertFalse(received.contains("Số dư"));
+            monitor.pollOnce();
+            assertEquals(received, output.toString(StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    void walletChangesAndReseedingPreserveTheUserNotificationCursor() throws Exception {
+        FakeClient client = new FakeClient((user, path) -> account(path.substring("/api/accounts/".length()), 20_000));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (var monitor = monitor(client, output)) {
+            monitor.primeNotifications("bob");
+            monitor.setContext("bob", "bob-live", PROMPT, true);
+            client.notificationResponse.set(notifications(event(1, "alice", "bob", "bob-demo", 2_000)));
+            monitor.pollOnce();
+            assertTrue(output.toString(StandardCharsets.UTF_8).contains("Nhận 2.000 VND"));
+            output.reset();
+
+            monitor.seedBalance("bob", "bob-other", 20_000);
+            monitor.setContext("bob", "bob-other", PROMPT, true);
+            monitor.pollOnce();
+            assertEquals("", output.toString(StandardCharsets.UTF_8));
+            client.notificationResponse.set(notifications(event(2, "alice", "bob", "bob-demo", 4_000),
+                    event(1, "alice", "bob", "bob-demo", 2_000)));
+            monitor.setContext("bob", "bob-other", "Số tiền > ", false);
+            int calls = client.notificationCalls.get();
+            monitor.pollOnce();
+            assertEquals(calls, client.notificationCalls.get());
+            assertEquals("", output.toString(StandardCharsets.UTF_8));
+            monitor.setContext("bob", "bob-other", PROMPT, true);
+            monitor.pollOnce();
+            String received = output.toString(StandardCharsets.UTF_8);
+            assertTrue(received.contains("Nhận 4.000 VND vào ví bob-demo từ ví alice-live (ví đang mở: bob-other)"));
+            assertFalse(received.contains("2.000 VND"));
+            assertFalse(received.contains("Số tiền"));
+        }
+    }
+
+    @Test
+    void adminNotificationsOnlyAnnounceAdminOwnedDestinations() throws Exception {
+        FakeClient client = new FakeClient((user, path) -> account("admin-live", 20_000));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (var monitor = monitor(client, output)) {
+            monitor.primeNotifications("admin");
+            monitor.setContext("admin", "admin-live", PROMPT, true);
+            client.notificationResponse.set(notifications(event(2, "alice", "admin", "merchant-live", 4_000),
+                    event(1, "admin", "bob", "bob-live", 2_000)));
+            monitor.pollOnce();
+            String received = output.toString(StandardCharsets.UTF_8);
+            assertTrue(received.contains("Nhận 4.000 VND vào ví merchant-live"));
+            assertFalse(received.contains("2.000 VND"));
+        }
+    }
+
+    @Test
+    void notificationFailuresPreserveTheCursorAndDoNotStopBalanceUpdates() throws Exception {
+        AtomicReference<Response> balance = new AtomicReference<>(account("bob-live", 20_000));
+        FakeClient client = new FakeClient((user, path) -> balance.get());
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (var monitor = monitor(client, output)) {
+            monitor.primeNotifications("bob");
+            monitor.seedBalance("bob", "bob-live", 10_000);
+            monitor.setContext("bob", "bob-live", PROMPT, true);
+            client.notificationResponse.set(new Response(503, null));
+            monitor.pollOnce();
+            String failed = output.toString(StandardCharsets.UTF_8);
+            assertTrue(failed.contains("Số dư ví bob-live: 20.000 VND"));
+            assertTrue(failed.contains("Chưa cập nhật được thông báo nhận tiền"));
+            monitor.pollOnce();
+            assertEquals(failed, output.toString(StandardCharsets.UTF_8));
+
+            client.notificationResponse.set(notifications(event(1, "alice", "bob", "bob-other", 2_000)));
+            monitor.pollOnce();
+            assertTrue(output.toString(StandardCharsets.UTF_8).contains("Đã kết nối lại thông báo nhận tiền."));
+            assertTrue(output.toString(StandardCharsets.UTF_8).contains("Nhận 2.000 VND vào ví bob-other"));
+            output.reset();
+            balance.set(new Response(503, null));
+            client.notificationResponse.set(notifications(event(2, "alice", "bob", "bob-other", 4_000)));
+            monitor.pollOnce();
+            assertTrue(output.toString(StandardCharsets.UTF_8).contains("Chưa cập nhật được số dư ví bob-live"));
+            assertTrue(output.toString(StandardCharsets.UTF_8).contains("Nhận 4.000 VND vào ví bob-other"));
+        }
+    }
+
+    @Test
+    void failedPrimingReportsRecoveryWithoutAnnouncingOldHistoryAsNewMoney() throws Exception {
+        FakeClient client = new FakeClient((user, path) -> account("bob-live", 20_000));
+        client.notificationResponse.set(new Response(503, null));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (var monitor = monitor(client, output)) {
+            monitor.primeNotifications("bob");
+            assertTrue(output.toString(StandardCharsets.UTF_8).contains("Chưa cập nhật được thông báo nhận tiền"));
+            output.reset();
+            client.notificationResponse.set(notifications(event(1, "alice", "bob", "bob-other", 2_000)));
+            monitor.setContext("bob", "bob-live", PROMPT, true);
+            monitor.pollOnce();
+            assertTrue(output.toString(StandardCharsets.UTF_8).contains("Xem mục Thông báo để kiểm tra tiền nhận trong lúc gián đoạn."));
+            assertFalse(output.toString(StandardCharsets.UTF_8).contains("Nhận 2.000 VND"));
+            output.reset();
+            monitor.pollOnce();
+            assertEquals("", output.toString(StandardCharsets.UTF_8));
+            client.notificationResponse.set(notifications(event(2, "alice", "bob", "bob-other", 4_000)));
+            monitor.pollOnce();
+            assertTrue(output.toString(StandardCharsets.UTF_8).contains("Nhận 4.000 VND vào ví bob-other"));
+        }
+    }
+
+    @Test
+    void staleNotificationResponseAfterPauseDoesNotPrintOrConsumeIncomingMoney() throws Exception {
+        FakeClient client = new FakeClient((user, path) -> account("bob-live", 20_000));
+        CountDownLatch requested = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (var monitor = monitor(client, output)) {
+            monitor.primeNotifications("bob");
+            monitor.setContext("bob", "bob-live", PROMPT, true);
+            var incoming = notifications(event(1, "alice", "bob", "bob-other", 2_000));
+            client.notificationResponder = (user, path) -> {
+                requested.countDown();
+                assertTrue(release.await(3, TimeUnit.SECONDS));
+                return incoming;
+            };
+            CompletableFuture<Void> pending = CompletableFuture.runAsync(monitor::pollOnce);
+            try {
+                assertTrue(requested.await(3, TimeUnit.SECONDS));
+                monitor.setContext("bob", "bob-live", "Số tiền > ", false);
+                monitor.setContext("bob", "bob-live", PROMPT, true);
+            } finally {
+                release.countDown();
+            }
+            pending.get(3, TimeUnit.SECONDS);
+            assertEquals("", output.toString(StandardCharsets.UTF_8));
+            monitor.pollOnce();
+            String received = output.toString(StandardCharsets.UTF_8);
+            assertTrue(received.contains("Nhận 2.000 VND vào ví bob-other"));
+            monitor.pollOnce();
+            assertEquals(received, output.toString(StandardCharsets.UTF_8));
+        }
+    }
+
     private static LiveConsoleMonitor monitor(FakeClient client, ByteArrayOutputStream output) {
         return new LiveConsoleMonitor(client, new PrintStream(output, true, StandardCharsets.UTF_8));
     }
@@ -183,11 +343,25 @@ class LiveConsoleMonitorTest {
         return new Response(200, JSON.valueToTree(Map.of("accountId", wallet, "balance", balance)));
     }
 
+    private static Map<String, Object> event(long sequence, String sourceOwner, String destinationOwner,
+                                              String destination, long amount) throws Exception {
+        return Map.of("sequence_id", sequence, "payload", JSON.writeValueAsString(Map.of(
+                "source", sourceOwner + "-live", "destination", destination, "amount", amount,
+                "source_owner", sourceOwner, "destination_owner", destinationOwner)));
+    }
+
+    private static Response notifications(Object... events) {
+        return new Response(200, JSON.valueToTree(List.of(events)));
+    }
+
     @FunctionalInterface
     private interface Responder { Response respond(String user, String path) throws Exception; }
 
     private static final class FakeClient extends WalletApiClient {
         private final AtomicInteger calls = new AtomicInteger();
+        private final AtomicInteger notificationCalls = new AtomicInteger();
+        private final AtomicReference<Response> notificationResponse = new AtomicReference<>(notifications());
+        private volatile Responder notificationResponder = (user, path) -> notificationResponse.get();
         private final Responder responder;
 
         private FakeClient(Responder responder) {
@@ -198,9 +372,13 @@ class LiveConsoleMonitorTest {
         @Override
         public Response request(String user, String method, String path, Object body, String key) throws Exception {
             assertEquals("GET", method);
-            assertEquals("/api/accounts/" + user + "-live", path);
             assertNull(body);
             assertNull(key);
+            if (path.equals("/api/notifications")) {
+                notificationCalls.incrementAndGet();
+                return notificationResponder.respond(user, path);
+            }
+            assertTrue(path.startsWith("/api/accounts/"));
             calls.incrementAndGet();
             return responder.respond(user, path);
         }

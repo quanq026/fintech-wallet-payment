@@ -73,7 +73,10 @@ public class WalletConsole {
     }
 
     public void run() {
-        if (liveMonitor != null) liveMonitor.start();
+        if (liveMonitor != null) {
+            liveMonitor.primeNotifications(user);
+            liveMonitor.start();
+        }
         try {
             while (true) {
                 display.title("FINTECH WALLET | Ví điện tử");
@@ -533,6 +536,7 @@ public class WalletConsole {
         List<JsonNode> known = wallets.values().stream().filter(w -> text(w, "kind").equals(requiredKind)
                 && !text(w, "accountId").equals(source)).toList();
         out.println("\nChọn " + (requiredKind.equals("MERCHANT") ? "cửa hàng" : "ví nhận") + ":");
+        out.println("Một tài khoản có thể có nhiều ví. Hãy kiểm tra đúng mã ví nhận.");
         for (int i = 0; i < known.size(); i++)
             out.println((i + 1) + ". " + text(known.get(i), "ownerId") + " | " + text(known.get(i), "accountId"));
         out.println((known.size() + 1) + ". Nhập mã ví khác");

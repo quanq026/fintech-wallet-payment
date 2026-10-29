@@ -689,6 +689,7 @@ class WalletConsoleTest {
 
         @Override
         public Response request(String user, String method, String path, Object body, String key) throws Exception {
+            if (method.equals("GET") && path.equals("/api/notifications")) return response(200, List.of());
             Call call = new Call(user, method, path, JSON.valueToTree(body), key);
             calls.add(call);
             return responder.respond(call);
