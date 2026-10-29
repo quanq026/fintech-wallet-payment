@@ -179,23 +179,26 @@ class WalletConsoleTest {
             assertTrue(output.contains("1. Tổng quan ví"));
             assertTrue(output.contains("6. Giao dịch & thông báo"));
             assertTrue(output.contains("Chọn một số từ 0 đến 6."));
-            assertFalse(output.contains("7. Quản trị"));
+            assertFalse(output.contains("7. Tạo ví cửa hàng"));
             for (String hidden : List.of("demo", "test", "kiểm thử", "giả lập", "dùng thử"))
                 assertFalse(output.toLowerCase(Locale.ROOT).contains(hidden), hidden);
         }
 
         FakeClient admin = new FakeClient(call -> {
             assertEquals("admin", call.user);
-            assertEquals("GET", call.method);
-            assertEquals("/api/risk/flags", call.path);
-            return response(200, List.of());
+            if (call.method.equals("POST")) {
+                assertEquals("/api/accounts", call.path);
+                assertEquals(JSON.valueToTree(Map.of("accountId", "shop-ui", "ownerId", "admin", "kind", "MERCHANT")), call.body);
+            } else assertEquals("/api/accounts/shop-ui", call.path);
+            return response(200, Map.of("accountId", "shop-ui", "ownerId", "admin", "kind", "MERCHANT", "balance", 0L));
         });
-        String output = run("5\n5\n3\n0\n7\n2\n\n0\n0\n", admin);
+        String output = run("5\n5\n3\n0\n7\nshop-ui\n\n0\n", admin);
 
-        assertEquals(1, admin.calls.size());
-        assertTrue(output.contains("7. Quản trị"));
-        assertTrue(output.contains("QUẢN TRỊ | admin"));
-        assertTrue(output.contains("4. Thiết lập tài khoản ngân hàng"));
+        assertEquals(1, posts(admin).size());
+        assertTrue(output.contains("7. Tạo ví cửa hàng"));
+        assertTrue(output.contains("TẠO VÍ CỬA HÀNG"));
+        for (String removed : List.of("QUẢN TRỊ", "Đối soát", "cảnh báo rủi ro", "Thiết lập tài khoản ngân hàng"))
+            assertFalse(output.contains(removed), removed);
         for (String hidden : List.of("demo", "test", "kiểm thử", "giả lập", "dùng thử"))
             assertFalse(output.toLowerCase(Locale.ROOT).contains(hidden), hidden);
     }

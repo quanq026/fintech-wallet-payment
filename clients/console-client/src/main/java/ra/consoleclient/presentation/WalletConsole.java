@@ -91,7 +91,7 @@ public class WalletConsole {
                 out.println(fixedUser == null ? "5. Ví & người dùng          Số dư, tạo/chọn ví, đổi Alice/Bob/admin"
                         : "5. Ví của tôi              Số dư, tạo/chọn ví và lịch sử");
                 out.println("6. Giao dịch & thông báo    Xem kết quả, tiếp tục lệnh đang chờ");
-                if (user.equals("admin")) out.println("7. Quản trị                 Đối soát, cảnh báo và quản lý cửa hàng");
+                if (user.equals("admin")) out.println("7. Tạo ví cửa hàng");
                 out.println("0. Thoát");
                 if (liveMonitor != null) out.println("Số dư ví tự cập nhật mỗi 2 giây khi chờ tại menu này.");
                 int choice;
@@ -107,7 +107,7 @@ public class WalletConsole {
                         case 4 -> paymentMenu();
                         case 5 -> walletMenu();
                         case 6 -> activityMenu();
-                        case 7 -> adminMenu();
+                        case 7 -> { createWallet("MERCHANT"); pause(); }
                     }
                 });
             }
@@ -158,7 +158,7 @@ public class WalletConsole {
 
     private void changeUser() {
         display.title("ĐỔI NGƯỜI DÙNG");
-        out.println("Alice/Bob dùng ví cá nhân. Admin xem đối soát và tạo ví cửa hàng.");
+        out.println("Alice/Bob dùng ví cá nhân. Admin có thể tạo ví cửa hàng.");
         int option = menu("Alice", "Bob", "Admin");
         if (option != 0) {
             user = List.of("alice", "bob", "admin").get(option - 1);
@@ -723,66 +723,14 @@ public class WalletConsole {
         pause();
     }
 
-    private void adminMenu() {
-        if (!user.equals("admin")) throw new UserMessage("Chức năng dành cho admin.");
-        while (true) {
-            display.title("QUẢN TRỊ | " + user);
-            int option = menu("Đối soát sổ cái và audit", "Xem cảnh báo rủi ro",
-                    "Tạo ví cửa hàng", "Thiết lập tài khoản ngân hàng");
-            if (option == 0) return;
-            perform(() -> {
-                switch (option) {
-                    case 1 -> { reconcile(); pause(); }
-                    case 2 -> { riskFlags(); pause(); }
-                    case 3 -> { createWallet("MERCHANT"); pause(); }
-                    case 4 -> { ensureBank(); out.println("Tài khoản ngân hàng đã sẵn sàng để nạp/rút tiền."); pause(); }
-                }
-            });
-        }
-    }
-
-    private void ensureBank() throws Exception {
-        Response existing = client.request("admin", "GET", "/api/accounts/bank-clearing", null, null);
-        if (existing.status() == 404) {
-            Response created = client.request("admin", "POST", "/api/accounts",
-                    Map.of("accountId", "bank-clearing", "ownerId", "admin", "kind", "CLEARING"), null);
-            if (!created.successful() && created.status() != 409) throw failure(created);
-            existing = client.request("admin", "GET", "/api/accounts/bank-clearing", null, null);
-        }
-        if (!existing.successful()) throw failure(existing);
-        if (!text(existing.body(), "kind").equals("CLEARING") || !text(existing.body(), "ownerId").equals("admin"))
-            throw new UserMessage("Tài khoản ngân hàng chưa sẵn sàng. Liên hệ quản trị viên để kiểm tra trước khi nạp/rút.");
-    }
-
     private void checkBankReady() throws Exception {
         Response response = client.request(user, "GET", "/api/accounts/bank-clearing", null, null);
         if (response.status() == 404)
-            throw new UserMessage("Tài khoản ngân hàng chưa sẵn sàng. Admin cần mở 'Quản trị > Thiết lập tài khoản ngân hàng'. Chưa gửi lệnh tiền.");
+            throw new UserMessage("Dịch vụ ngân hàng chưa sẵn sàng. Vui lòng thử lại sau. Chưa gửi lệnh tiền.");
         if (response.status() == 403 && text(response.body(), "code").equals("NOT_WALLET_OWNER")) return;
         if (!response.successful()) throw failure(response);
         if (!text(response.body(), "kind").equals("CLEARING"))
             throw new UserMessage("Tài khoản ngân hàng chưa đủ điều kiện nạp/rút. Liên hệ quản trị viên để kiểm tra.");
-    }
-
-    private void reconcile() throws Exception {
-        display.title("ĐỐI SOÁT | toàn hệ thống");
-        display.reconciliation(data("admin", "GET", "/api/reconciliation", null),
-                data("admin", "GET", "/api/audit/reconciliation", null));
-    }
-
-    private void riskFlags() throws Exception {
-        JsonNode flags = data("admin", "GET", "/api/risk/flags", null);
-        if (flags.isEmpty()) out.println("Chưa ghi nhận cảnh báo rủi ro.");
-        for (JsonNode flag : flags) {
-            String reason = switch (text(flag, "reason")) {
-                case "AMOUNT_LIMIT" -> "Số tiền vượt 250.000.000 VND";
-                case "VELOCITY_LIMIT" -> "Quá nhiều giao dịch trong 1 phút; chờ rồi thử giao dịch mới";
-                case "NEW_IP_LARGE_AMOUNT" -> "Nguồn truy cập thay đổi và số tiền lớn";
-                default -> text(flag, "reason");
-            };
-            out.println(text(flag, "user_id") + " | " + money(flag.path("amount").asLong()) + " | " + reason);
-            out.println("  Mã giao dịch: " + text(flag, "transaction_id"));
-        }
     }
 
     private JsonNode data(String actor, String method, String path, Object body) throws Exception {

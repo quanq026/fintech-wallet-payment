@@ -87,40 +87,17 @@ final class ConsoleDisplay {
         out.println("Dấu +: tiền vào ví. Dấu -: tiền ra khỏi ví.");
     }
 
-    void reconciliation(JsonNode result, JsonNode audit) {
-        var ledger = result.path("ledger");
-        boolean balanced = ledger.has("totalAmount") && ledger.path("totalAmount").asLong() == 0
-                && ledger.path("unbalancedJournals").asLong(-1) == 0
-                && ledger.path("negativeUserAccounts").asLong(-1) == 0;
-        out.println((balanced ? "[ĐẠT]" : "[CẦN KIỂM TRA]") + " Sổ cái: tổng tiền = 0, không lệch bút toán, không âm ví người dùng.");
-        out.println("Bút toán: " + ledger.path("journalCount").asLong() + " | Dòng ghi sổ: " + ledger.path("entryCount").asLong());
-        out.println("Tổng toàn hệ thống: " + money(ledger.path("totalAmount").asLong())
-                + " (bao gồm tài khoản đối ứng ngân hàng).");
-        out.println("Bút toán lệch: " + ledger.path("unbalancedJournals").asLong()
-                + " | Ví người dùng bị âm: " + ledger.path("negativeUserAccounts").asLong());
-        if (!audit.path("valid").asBoolean()) {
-            out.println("[CẦN KIỂM TRA] Chuỗi audit không hợp lệ.");
-        } else if (result.path("outboxPending").asLong(-1) != 0
-                || audit.path("verifiedEvents").asLong(-1) < ledger.path("journalCount").asLong()) {
-            out.println("[ĐANG ĐỒNG BỘ] Audit hợp lệ nhưng sự kiện chưa tới đủ. Đợi vài giây rồi đối soát lại.");
-        } else {
-            out.println("[ĐẠT] Chuỗi audit hợp lệ; sự kiện đã đồng bộ tại thời điểm kiểm tra.");
-        }
-        out.println("Sự kiện audit đã kiểm tra: " + audit.path("verifiedEvents").asLong()
-                + " | Sự kiện chờ gửi: " + result.path("outboxPending").asLong());
-    }
-
     static String error(String code) {
         return switch (code) {
             case "NOT_WALLET_OWNER", "NOT_PAYMENT_OWNER", "NOT_TRANSACTION_OWNER" ->
                     "Bạn không sở hữu ví/giao dịch này. Chọn đúng người dùng rồi thử lại.";
-            case "ADMIN_REQUIRED" -> "Chức năng dành cho admin. Đổi người dùng ở menu chính.";
+            case "ADMIN_REQUIRED" -> "Chức năng dành cho admin.";
             case "NOT_FOUND", "ACCOUNT_NOT_FOUND", "PAYMENT_NOT_FOUND", "TRANSACTION_NOT_FOUND" ->
                     "Không tìm thấy mã này. Kiểm tra mã hoặc tạo ví trước.";
             case "ALREADY_EXISTS", "ACCOUNT_ALREADY_EXISTS" -> "Mã ví đã tồn tại. Chọn 'Mở/chọn ví' hoặc dùng mã khác.";
             case "INSUFFICIENT_FUNDS" -> "Ví không đủ tiền. Xem số dư hoặc nạp thêm trước khi thử lại.";
             case "FAILED_PRECONDITION" -> "Ví chưa đủ điều kiện giao dịch. Kiểm tra số dư và trạng thái ví.";
-            case "RISK_REJECTED" -> "Quy tắc rủi ro đã từ chối. Admin có thể xem lý do ở 'Cảnh báo rủi ro'.";
+            case "RISK_REJECTED" -> "Giao dịch bị từ chối theo quy tắc rủi ro.";
             case "MERCHANT_REQUIRED" -> "Ví nhận phải là ví cửa hàng; không dùng ví cá nhân để thanh toán cửa hàng.";
             case "DEPOSIT_REQUIRED" -> "Chỉ lệnh nạp tiền mới cần xác nhận ngân hàng.";
             case "IDEMPOTENCY_PAYLOAD_MISMATCH" -> "Nội dung khác với lệnh đã gửi. Không thể dùng lại mã của lệnh cũ.";

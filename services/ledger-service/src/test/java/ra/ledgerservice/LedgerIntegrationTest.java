@@ -38,6 +38,19 @@ class LedgerIntegrationTest {
     }
 
     @Test
+    void bankClearingIsPreparedAutomaticallyAndMetadataCannotBeReassigned() {
+        var clearing = ledger.getAccount("bank-clearing");
+        assertEquals("admin", clearing.getOwnerId());
+        assertEquals("CLEARING", clearing.getKind());
+        assertEquals("VND", clearing.getCurrency());
+        assertEquals(clearing, ledger.createAccount(CreateAccountRequest.newBuilder()
+                .setAccountId("bank-clearing").setOwnerId("admin").setKind("CLEARING").build()));
+        assertThrows(IllegalArgumentException.class, () -> ledger.createAccount(CreateAccountRequest.newBuilder()
+                .setAccountId("bank-clearing").setOwnerId("alice").setKind("USER").build()));
+        assertEquals("admin", ledger.getAccount("bank-clearing").getOwnerId());
+    }
+
+    @Test
     void balancedImmutableIdempotentAndNoOverdraft() {
         String clearing = account("CLEARING"), a = account("USER"), b = account("USER");
         var funding = request(clearing, a, 100);
