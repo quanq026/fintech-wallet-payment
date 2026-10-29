@@ -1,0 +1,23 @@
+syntax = "proto3";
+package fintech.ledger;
+option java_package = "ra.contracts.ledger";
+option java_multiple_files = true;
+service LedgerService {
+  rpc CreateAccount(CreateAccountRequest) returns (Account);
+  rpc GetAccount(GetAccountRequest) returns (Account);
+  rpc PostTransfer(PostTransferRequest) returns (Operation);
+  rpc GetOperation(GetOperationRequest) returns (Operation);
+  rpc ListEntries(ListEntriesRequest) returns (ListEntriesResponse);
+  rpc Reconcile(EmptyRequest) returns (Reconciliation);
+}
+message CreateAccountRequest { string account_id = 1; string owner_id = 2; string kind = 3; }
+message GetAccountRequest { string account_id = 1; }
+message Account { string account_id = 1; string owner_id = 2; string kind = 3; int64 balance = 4; string currency = 5; }
+message PostTransferRequest { string operation_id = 1; string source_account_id = 2; string destination_account_id = 3; int64 amount = 4; string currency = 5; }
+message GetOperationRequest { string operation_id = 1; }
+message Operation { string operation_id = 1; string journal_id = 2; string source_account_id = 3; string destination_account_id = 4; int64 amount = 5; string currency = 6; }
+message ListEntriesRequest { string account_id = 1; }
+message LedgerEntry { int64 entry_id = 1; string journal_id = 2; string account_id = 3; int64 amount = 4; string currency = 5; string created_at = 6; }
+message ListEntriesResponse { repeated LedgerEntry entries = 1; }
+message EmptyRequest {}
+message Reconciliation { int64 journal_count = 1; int64 entry_count = 2; int64 total_amount = 3; int64 unbalanced_journals = 4; int64 negative_user_accounts = 5; }

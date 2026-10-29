@@ -1,0 +1,21 @@
+server:
+  address: 127.0.0.1
+  port: ${LEDGER_HTTP_PORT:8081}
+spring:
+  datasource:
+    url: ${LEDGER_DB_URL:jdbc:mysql://localhost:3306/fintech_ledger}
+    username: ${LEDGER_DB_USER:fintech_ledger}
+    password: ${LEDGER_DB_PASSWORD:}
+  flyway:
+    url: ${LEDGER_MIGRATION_URL:${LEDGER_DB_URL:jdbc:mysql://localhost:3306/fintech_ledger}}
+    user: ${LEDGER_MIGRATION_USER:${LEDGER_DB_USER:fintech_ledger}}
+    password: ${LEDGER_MIGRATION_PASSWORD:${LEDGER_DB_PASSWORD:}}
+ledger:
+  grpc:
+    port: ${LEDGER_GRPC_PORT:9091}
+  internal-token: ${LEDGER_INTERNAL_TOKEN}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

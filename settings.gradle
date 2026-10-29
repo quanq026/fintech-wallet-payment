@@ -1,0 +1,11 @@
+rootProject.name = 'fintech-wallet-payment'
+include 'common', 'contracts', 'ledger-service', 'transaction-service', 'gateway-service', 'payment-service', 'audit-service', 'console-client'
+
+project(':common').projectDir = file('shared/common')
+project(':contracts').projectDir = file('shared/contracts')
+project(':ledger-service').projectDir = file('services/ledger-service')
+project(':transaction-service').projectDir = file('services/transaction-service')
+project(':gateway-service').projectDir = file('services/gateway-service')
+project(':payment-service').projectDir = file('services/payment-service')
+project(':audit-service').projectDir = file('services/audit-service')
+project(':console-client').projectDir = file('clients/console-client')

@@ -1,0 +1,15 @@
+{
+  "properties": [
+    {
+      "name": "ledger.grpc.port",
+      "type": "java.lang.Integer",
+      "defaultValue": 9091,
+      "description": "Local Ledger gRPC port. Zero allocates an ephemeral port for integration tests."
+    },
+    {
+      "name": "ledger.internal-token",
+      "type": "java.lang.String",
+      "description": "Internal authentication token supplied through local environment configuration."
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+plugins {
+    id 'org.springframework.boot' version '3.5.16' apply false
+    id 'io.spring.dependency-management' version '1.1.7' apply false
+    id 'com.google.protobuf' version '0.10.0' apply false
+}
+
+allprojects {
+    group = 'ra.fintech'
+    version = '1.0.0'
+    repositories { mavenCentral() }
+}
+
+configurations {
+    kafkaRuntime {
+        attributes {
+            attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage, Usage.JAVA_RUNTIME))
+            attribute(Bundling.BUNDLING_ATTRIBUTE, objects.named(Bundling, Bundling.EXTERNAL))
+        }
+    }
+}
+dependencies {
+    kafkaRuntime 'org.apache.kafka:kafka_2.13:3.9.1'
+    kafkaRuntime 'org.slf4j:slf4j-simple:1.7.36'
+}
+tasks.register('prepareKafka', Copy) {
+    from configurations.kafkaRuntime
+    into layout.projectDirectory.dir('work/kafka/lib')
+}
+
+subprojects {
+    apply plugin: 'java'
+    java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }
+    tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+    tasks.withType(Test).configureEach { useJUnitPlatform() }
+}
+
+tasks.register('stopLocal', Exec) {
+    group = 'local'
+    description = 'Stop the local FinTech processes; leave MySQL running.'
+    commandLine 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            '-File', file('scripts/stop-local.ps1').absolutePath
+}
+
+tasks.register('prepareLocal', Exec) {
+    group = 'local'
+    description = 'Build and start the local backend before the IntelliJ console.'
+    dependsOn 'stopLocal', ':console-client:classes'
+    ['ledger-service', 'transaction-service', 'payment-service', 'audit-service', 'gateway-service'].each {
+        dependsOn ":${it}:bootJar"
+        project(":${it}").tasks.matching { it.name == 'bootJar' }.configureEach {
+            mustRunAfter rootProject.tasks.named('stopLocal')
+        }
+    }
+    commandLine 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            '-File', file('scripts/start-local.ps1').absolutePath
+}

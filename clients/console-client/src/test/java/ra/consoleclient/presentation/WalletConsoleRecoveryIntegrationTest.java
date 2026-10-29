@@ -1,0 +1,141 @@
+package ra.consoleclient.presentation;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
+import org.junit.jupiter.api.io.TempDir;
+import ra.consoleclient.client.WalletApiClient;
+import ra.consoleclient.client.WalletApiClient.Response;
+
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.net.http.HttpTimeoutException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Scanner;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+// Uses the local Gateway and MySQL ledger; only the accepted response is intentionally lost.
+@EnabledIfEnvironmentVariable(named = "CONSOLE_INTEGRATION_TEST", matches = "true")
+class WalletConsoleRecoveryIntegrationTest {
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    @Test
+    void acceptedTransferSurvivesConsoleRestartAndDebitsExactlyOnce(@TempDir Path directory) throws Exception {
+        WalletApiClient api = new WalletApiClient();
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String source = "recover-alice-" + suffix, destination = "recover-bob-" + suffix;
+        for (var wallet : List.of(Map.of("accountId", source, "ownerId", "alice", "kind", "USER"),
+                Map.of("accountId", destination, "ownerId", "bob", "kind", "USER")))
+            request(api, "admin", "POST", "/api/accounts", wallet, null);
+        Response clearing = api.request("admin", "POST", "/api/accounts",
+                Map.of("accountId", "bank-clearing", "ownerId", "admin", "kind", "CLEARING"), null);
+        assertTrue(clearing.successful() || clearing.status() == 409);
+        JsonNode deposit = request(api, "alice", "POST", "/api/deposits",
+                Map.of("accountId", source, "amount", 10_000L), UUID.randomUUID().toString());
+        request(api, "alice", "POST", "/api/bank/settle/" + deposit.path("id").asText(), Map.of(), null);
+        awaitCompleted(api, "alice", "/api/payments/" + deposit.path("id").asText());
+        assertEquals(10_000L, balance(api, "alice", source));
+
+        Path bookmarks = directory.resolve("console-wallets.json");
+        Path journal = directory.resolve("console-requests.json");
+        RecordingClient first = new RecordingClient(journal, true);
+        run("5\n2\n1\n" + source + "\n0\n3\n1\n" + destination + "\n1000\n1\n\n0\n", first, bookmarks);
+        assertEquals(1, first.transfers.size());
+        Submitted original = first.transfers.get(0);
+        JsonNode saved = JSON.readTree(journal.toFile()).path("receipts").get(0);
+        assertEquals(original.key(), saved.path("key").asText());
+        assertEquals("", saved.path("id").asText());
+        assertTrue(saved.path("attempted").asBoolean());
+        JsonNode transaction = awaitCompleted(api, "alice", "/api/transactions/" + first.acceptedId);
+        assertEquals(9_000L, balance(api, "alice", source));
+
+        RecordingClient reopened = new RecordingClient(journal, false);
+        String output = run("6\n1\n1\n\n0\n0\n", reopened, bookmarks);
+        assertEquals(List.of(original), reopened.transfers);
+        assertEquals(first.acceptedId, reopened.acceptedId);
+        assertTrue(output.contains("HOÀN TẤT"), output);
+        assertEquals(9_000L, balance(api, "alice", source));
+        assertEquals(1_000L, balance(api, "bob", destination));
+        JsonNode entries = request(api, "alice", "GET", "/api/accounts/" + source + "/entries", null, null);
+        long debits = 0;
+        for (JsonNode entry : entries)
+            if (entry.path("journalId").asText().equals(transaction.path("journal_id").asText())
+                    && entry.path("amount").asLong() == -1_000L) debits++;
+        assertEquals(1, debits);
+        JsonNode recovered = JSON.readTree(journal.toFile()).path("receipts").get(0);
+        assertEquals(first.acceptedId, recovered.path("id").asText());
+        assertEquals("COMPLETED", recovered.path("data").path("status").asText());
+    }
+
+    private static JsonNode request(WalletApiClient api, String user, String method, String path,
+                                    Object body, String key) throws Exception {
+        Response response = api.request(user, method, path, body, key);
+        assertTrue(response.successful(), () -> path + " returned " + response.status());
+        return response.body();
+    }
+
+    private static JsonNode awaitCompleted(WalletApiClient api, String user, String path) throws Exception {
+        for (int attempt = 0; attempt < 40; attempt++) {
+            JsonNode state = request(api, user, "GET", path, null, null);
+            if (state.path("status").asText().equals("COMPLETED")) return state;
+            assertNotEquals("REJECTED", state.path("status").asText(), state.toString());
+            Thread.sleep(250);
+        }
+        throw new AssertionError("Request did not complete: " + path);
+    }
+
+    private static long balance(WalletApiClient api, String user, String account) throws Exception {
+        return request(api, user, "GET", "/api/accounts/" + account, null, null).path("balance").asLong();
+    }
+
+    private static String run(String input, WalletApiClient api, Path bookmarks) {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (Scanner scanner = new Scanner(input); PrintStream stream = new PrintStream(output, true, StandardCharsets.UTF_8)) {
+            new WalletConsole(scanner, stream, api, bookmarks).run();
+        }
+        return output.toString(StandardCharsets.UTF_8);
+    }
+
+    private record Submitted(String user, JsonNode body, String key) { }
+
+    private static final class RecordingClient extends WalletApiClient {
+        private final Path journal;
+        private final boolean loseResponse;
+        private final List<Submitted> transfers = new ArrayList<>();
+        private String acceptedId;
+
+        private RecordingClient(Path journal, boolean loseResponse) {
+            this.journal = journal;
+            this.loseResponse = loseResponse;
+        }
+
+        @Override
+        public Response request(String user, String method, String path, Object body, String key) throws Exception {
+            boolean transfer = method.equals("POST") && path.equals("/api/transfers");
+            if (transfer) {
+                assertTrue(Files.isRegularFile(journal), "Intent must be saved before network I/O");
+                JsonNode intent = JSON.readTree(journal.toFile()).path("receipts").get(0);
+                assertEquals(key, intent.path("key").asText());
+                assertEquals(user, intent.path("user").asText());
+                JsonNode payload = JSON.readTree(JSON.writeValueAsBytes(body));
+                assertEquals(payload, intent.path("body"));
+                transfers.add(new Submitted(user, payload, key));
+            }
+            Response response = super.request(user, method, path, body, key);
+            if (transfer) {
+                assertTrue(response.successful());
+                acceptedId = response.body().path("id").asText();
+                if (loseResponse) throw new HttpTimeoutException("Accepted response intentionally discarded");
+            }
+            return response;
+        }
+    }
+}

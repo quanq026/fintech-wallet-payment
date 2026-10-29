@@ -1,0 +1,12 @@
+.gradle/
+**/build/
+.idea/
+*.iml
+.env
+.env.*
+!.env.example
+work/
+logs/
+__pycache__/
+.venv/
+*.p12

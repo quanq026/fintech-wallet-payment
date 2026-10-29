@@ -1,0 +1,13 @@
+CREATE TABLE transactions (
+ id VARCHAR(36) PRIMARY KEY, client_id VARCHAR(80) NOT NULL, idempotency_key VARCHAR(36) NOT NULL,
+ fingerprint CHAR(64) NOT NULL, source_account VARCHAR(80) NOT NULL, destination_account VARCHAR(80) NOT NULL,
+ amount BIGINT NOT NULL, kind VARCHAR(20) NOT NULL, status VARCHAR(20) NOT NULL,
+ journal_id VARCHAR(80), error_code VARCHAR(80), request_ip VARCHAR(80) NOT NULL,
+ created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+ updated_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+ UNIQUE KEY uq_client_key(client_id,idempotency_key), CHECK(amount>0)
+) ENGINE=InnoDB;
+CREATE TABLE outbox (
+ event_id VARCHAR(36) PRIMARY KEY, transaction_id VARCHAR(36) NOT NULL UNIQUE, payload JSON NOT NULL,
+ published BOOLEAN NOT NULL DEFAULT FALSE, created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB;

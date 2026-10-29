@@ -1,0 +1,3768 @@
+{
+  "info": {
+    "_postman_id": "5ac506c4-1906-4d7e-aab6-5858b3a452b5",
+    "name": "FinTech Wallet & Payment - Local API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Import this collection and FinTech-Local.postman_environment.json. Fill the five secret environment variables locally (ALICE_HMAC_KEY, BOB_HMAC_KEY, ADMIN_HMAC_KEY, INTERNAL_TOKEN, BANK_SECRET). Start local services, then run all folders in order with Collection Runner, one iteration, 100 ms request delay. The first request initializes a fresh run. Main requests create isolated wallets and use only sandbox VND. Gateway authentication signs exact UTF-8 body bytes and raw path/query with a fresh nonce; financial retries retain their original key. Successful transactions/payments are polled for up to 20 seconds and must reach the expected terminal state. Repeated full runs within one minute can trigger the real Fraud velocity limit; allow at least 60 seconds between runs. No real credential is included. Do not export an environment containing secrets."
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "const walletCrypto = require('crypto-js');",
+          "function requiredSecret(name) {",
+          "    const value = pm.environment.get(name);",
+          "    if (!value || value.length < 32) {",
+          "        if (pm.execution && pm.execution.skipRequest) pm.execution.skipRequest();",
+          "        throw new Error('Set local environment secret ' + name + ' (at least 32 characters).');",
+          "    }",
+          "    return value;",
+          "}",
+          "const url = pm.variables.replaceIn(pm.request.url.toString());",
+          "if (/\\{\\{[^}]+\\}\\}/.test(url)) throw new Error('Run the collection from the first request to initialize wallet/payment IDs.');",
+          "pm.request.url.update(url);",
+          "if (pm.request.body && pm.request.body.mode === 'raw') {",
+          "    pm.request.body.raw = pm.variables.replaceIn(pm.request.body.raw || '');",
+          "}",
+          "const body = pm.request.body && pm.request.body.mode === 'raw' ? pm.request.body.raw : '';",
+          "const target = (url.match(/^https?:\\/\\/[^/]+(\\/[^#]*)?/) || [])[1] || '/';",
+          "const clientHeader = pm.request.headers.get('X-Client-Id');",
+          "if (clientHeader) {",
+          "    const client = pm.variables.replaceIn(clientHeader);",
+          "    const keyName = {alice:'ALICE_HMAC_KEY',bob:'BOB_HMAC_KEY',admin:'ADMIN_HMAC_KEY'}[client];",
+          "    if (!keyName) throw new Error('Unsupported signing identity.');",
+          "    const secret = requiredSecret(keyName);",
+          "    const timestamp = String(Math.floor(Date.now() / 1000));",
+          "    const nonce = pm.variables.replaceIn(pm.request.headers.get('X-Nonce') || '{{$guid}}');",
+          "    const idempotencyKey = pm.variables.replaceIn(pm.request.headers.get('X-Idempotency-Key') || '');",
+          "    const canonical = [pm.request.method,target,timestamp,nonce,walletCrypto.SHA256(body).toString(),idempotencyKey].join('\\n');",
+          "    pm.request.headers.upsert({key:'X-Client-Id',value:client});",
+          "    pm.request.headers.upsert({key:'X-Timestamp',value:timestamp});",
+          "    pm.request.headers.upsert({key:'X-Nonce',value:nonce});",
+          "    if (idempotencyKey) pm.request.headers.upsert({key:'X-Idempotency-Key',value:idempotencyKey});",
+          "    pm.request.headers.upsert({key:'X-Signature',value:walletCrypto.HmacSHA256(canonical,secret).toString()});",
+          "}",
+          "if (pm.request.headers.has('X-Internal-Token')) {",
+          "    pm.request.headers.upsert({key:'X-Internal-Token',value:requiredSecret('INTERNAL_TOKEN')});",
+          "}",
+          "if (pm.request.headers.has('X-Bank-Signature')) {",
+          "    const canonical = ['POST','/internal/webhook','0','bank',walletCrypto.SHA256(body).toString()].join('\\n');",
+          "    pm.request.headers.upsert({key:'X-Bank-Signature',value:walletCrypto.HmacSHA256(canonical,requiredSecret('BANK_SECRET')).toString()});",
+          "}"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://127.0.0.1:8080",
+      "type": "string"
+    },
+    {
+      "key": "ledger_url",
+      "value": "http://127.0.0.1:8081",
+      "type": "string"
+    },
+    {
+      "key": "transaction_url",
+      "value": "http://127.0.0.1:8082",
+      "type": "string"
+    },
+    {
+      "key": "payment_url",
+      "value": "http://127.0.0.1:8083",
+      "type": "string"
+    },
+    {
+      "key": "audit_url",
+      "value": "http://127.0.0.1:8084",
+      "type": "string"
+    },
+    {
+      "key": "fraud_url",
+      "value": "http://127.0.0.1:8085",
+      "type": "string"
+    },
+    {
+      "key": "bank_url",
+      "value": "http://127.0.0.1:8086",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "01 - Health",
+      "description": "The first request starts a fresh run and generates isolated wallet IDs and stable operation keys. Run all folders in order once; each later retry reuses its original key.",
+      "item": [
+        {
+          "name": "Gateway - UP",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/actuator/health",
+            "description": "Gateway - UP"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const runId = pm.variables.replaceIn('{{$guid}}').replace(/-/g,'').slice(0,12);",
+                  "pm.collectionVariables.set('run_id',runId);",
+                  "pm.collectionVariables.set('alice_account','postman-alice-' + runId);",
+                  "pm.collectionVariables.set('bob_account','postman-bob-' + runId);",
+                  "pm.collectionVariables.set('merchant_account','postman-merchant-' + runId);",
+                  "for (const name of ['deposit_key','transfer_key','withdrawal_key','merchant_key','risk_key','insufficient_key','invalid_key','replay_nonce','internal_operation_id']) {",
+                  "    pm.collectionVariables.set(name,pm.variables.replaceIn('{{$guid}}'));",
+                  "}",
+                  "for (const name of ['deposit_id','deposit_reference','deposit_transaction_id','transfer_id','transfer_journal_id','withdrawal_id','merchant_payment_id','risk_transaction_id','insufficient_id','ledger_journals']) {",
+                  "    pm.collectionVariables.unset(name);",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Service is healthy\",function () { const value=pm.response.json(); pm.expect(value.status).to.eql('UP'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Ledger - UP",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{ledger_url}}/actuator/health",
+            "description": "Ledger - UP"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Service is healthy\",function () { const value=pm.response.json(); pm.expect(value.status).to.eql('UP'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Transaction - UP",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{transaction_url}}/actuator/health",
+            "description": "Transaction - UP"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Service is healthy\",function () { const value=pm.response.json(); pm.expect(value.status).to.eql('UP'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Payment - UP",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{payment_url}}/actuator/health",
+            "description": "Payment - UP"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Service is healthy\",function () { const value=pm.response.json(); pm.expect(value.status).to.eql('UP'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Audit - UP",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{audit_url}}/actuator/health",
+            "description": "Audit - UP"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Service is healthy\",function () { const value=pm.response.json(); pm.expect(value.status).to.eql('UP'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Fraud - UP",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{fraud_url}}/health",
+            "description": "Fraud - UP"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Service is healthy\",function () { const value=pm.response.json(); pm.expect(value.status).to.eql('UP'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Bank - UP",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{bank_url}}/health",
+            "description": "Bank - UP"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Service is healthy\",function () { const value=pm.response.json(); pm.expect(value.status).to.eql('UP'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "02 - Wallets",
+      "description": "Creates three fresh wallets. The reserved bank-clearing account is shared infrastructure; an existing account is accepted and then checked.",
+      "item": [
+        {
+          "name": "Create Alice wallet",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "admin"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts",
+            "description": "Create Alice wallet",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"accountId\":\"{{alice_account}}\",\"ownerId\":\"alice\",\"kind\":\"USER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"New wallet starts empty\",function () { const value=pm.response.json(); pm.expect(value.accountId).to.eql(pm.variables.get('alice_account')); pm.expect(value.ownerId).to.eql('alice'); pm.expect(value.kind).to.eql('USER'); pm.expect(value.balance).to.eql(0); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Create Bob wallet",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "admin"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts",
+            "description": "Create Bob wallet",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"accountId\":\"{{bob_account}}\",\"ownerId\":\"bob\",\"kind\":\"USER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"New wallet starts empty\",function () { const value=pm.response.json(); pm.expect(value.accountId).to.eql(pm.variables.get('bob_account')); pm.expect(value.ownerId).to.eql('bob'); pm.expect(value.kind).to.eql('USER'); pm.expect(value.balance).to.eql(0); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Create Merchant wallet",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "admin"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts",
+            "description": "Create Merchant wallet",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"accountId\":\"{{merchant_account}}\",\"ownerId\":\"admin\",\"kind\":\"MERCHANT\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"New wallet starts empty\",function () { const value=pm.response.json(); pm.expect(value.accountId).to.eql(pm.variables.get('merchant_account')); pm.expect(value.ownerId).to.eql('admin'); pm.expect(value.kind).to.eql('MERCHANT'); pm.expect(value.balance).to.eql(0); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Ensure bank clearing account",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "admin"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts",
+            "description": "Ensure bank clearing account",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"accountId\":\"bank-clearing\",\"ownerId\":\"admin\",\"kind\":\"CLEARING\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200, 409]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Read bank clearing account",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "admin"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts/bank-clearing",
+            "description": "Read bank clearing account"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Reserved clearing account has the correct kind\",function () { const value=pm.response.json(); pm.expect(value.ownerId).to.eql('admin'); pm.expect(value.kind).to.eql('CLEARING'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "03 - Deposit",
+      "description": "Deposit 100,000 VND into the new Alice wallet, settle through the local Bank API, and prove settlement retry does not credit twice. All money is local sandbox data.",
+      "item": [
+        {
+          "name": "Create deposit 100000 VND",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{deposit_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/deposits",
+            "description": "Create deposit 100000 VND",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"accountId\":\"{{alice_account}}\",\"amount\":100000}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Capture deposit and bank reference\",function () { const value=pm.response.json(); pm.expect(value.kind).to.eql('DEPOSIT'); pm.expect(value.amount).to.eql(100000); pm.expect(value.provider_reference).to.match(/^[0-9a-f-]{36}$/); pm.collectionVariables.set('deposit_id',value.id); pm.collectionVariables.set('deposit_reference',value.provider_reference); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Settle deposit at bank",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/bank/settle/{{deposit_id}}",
+            "description": "Settle deposit at bank",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "",
+                  "const pollCrypto = require('crypto-js');",
+                  "let attempts = 0;",
+                  "function finish(value) {",
+                  "    pm.test('Terminal result matches the expected outcome',function () {",
+                  "        pm.expect(value.status).to.eql('COMPLETED');",
+                  "pm.expect(value.id).to.match(/^[0-9a-f-]{36}$/);",
+                  "    });",
+                  "    pm.collectionVariables.set('deposit_transaction_id',value.transaction_id);",
+                  "}",
+                  "function again() {",
+                  "    if (++attempts > 40) {",
+                  "        pm.test('Operation resolves within 20 seconds',function () { throw new Error('Timed out awaiting terminal API state. Keep the same operation ID and idempotency key.'); });",
+                  "        return;",
+                  "    }",
+                  "    const target = pm.variables.replaceIn('/api/payments/{{deposit_id}}');",
+                  "    const stamp = String(Math.floor(Date.now()/1000));",
+                  "    const nonce = pm.variables.replaceIn('{{$guid}}');",
+                  "    const canonical = ['GET',target,stamp,nonce,pollCrypto.SHA256('').toString(),''].join('\\n');",
+                  "    const secret = pm.environment.get('ALICE_HMAC_KEY');",
+                  "    pm.sendRequest({",
+                  "        url:pm.variables.replaceIn('{{base_url}}')+target,method:'GET',",
+                  "        header:{'X-Client-Id':'alice','X-Timestamp':stamp,'X-Nonce':nonce,'X-Signature':pollCrypto.HmacSHA256(canonical,secret).toString()}",
+                  "    },function (error,response) {",
+                  "        if (error || !response || response.code !== 200) {",
+                  "            pm.test('Polling GET succeeds',function () { pm.expect(error).to.equal(null); pm.expect(response && response.code).to.eql(200); });",
+                  "            return;",
+                  "        }",
+                  "        const value = response.json();",
+                  "        if (['COMPLETED','REJECTED'].includes(value.status)) finish(value); else setTimeout(again,500);",
+                  "    });",
+                  "}",
+                  "again();"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Read completed deposit",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/payments/{{deposit_id}}",
+            "description": "Read completed deposit"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Deposit completed\",function () { const value=pm.response.json(); pm.expect(value.status).to.eql('COMPLETED'); pm.expect(value.amount).to.eql(100000); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Retry same bank settlement",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/bank/settle/{{deposit_id}}",
+            "description": "Retry same bank settlement",
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Same deposit and ledger transaction\",function () { const value=pm.response.json(); pm.expect(value.id).to.eql(pm.variables.get('deposit_id')); pm.expect(value.transaction_id).to.eql(pm.variables.get('deposit_transaction_id')); pm.expect(value.status).to.eql('COMPLETED'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Alice credited once",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts/{{alice_account}}",
+            "description": "Alice credited once"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Exact wallet balance in VND\",function () { const value=pm.response.json(); pm.expect(value.balance).to.eql(100000); pm.expect(value.currency).to.eql('VND'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "04 - Transfer and idempotency",
+      "description": "Transfer 1,000 VND. The retry uses the same body/key with a fresh HTTP nonce. Journal assertions prove one debit; changing the payload with the same key must fail.",
+      "item": [
+        {
+          "name": "Transfer Alice to Bob 1000 VND",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{transfer_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Transfer Alice to Bob 1000 VND",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200, 202]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.collectionVariables.set('transfer_id',pm.response.json().id);",
+                  "",
+                  "const pollCrypto = require('crypto-js');",
+                  "let attempts = 0;",
+                  "function finish(value) {",
+                  "    pm.test('Terminal result matches the expected outcome',function () {",
+                  "        pm.expect(value.status).to.eql('COMPLETED'); pm.expect(value.amount).to.eql(1000); pm.expect(value.journal_id).to.match(/^[0-9a-f-]{36}$/);",
+                  "pm.expect(value.id).to.match(/^[0-9a-f-]{36}$/);",
+                  "    });",
+                  "    pm.collectionVariables.set('transfer_journal_id',value.journal_id);",
+                  "}",
+                  "function again() {",
+                  "    if (++attempts > 40) {",
+                  "        pm.test('Operation resolves within 20 seconds',function () { throw new Error('Timed out awaiting terminal API state. Keep the same operation ID and idempotency key.'); });",
+                  "        return;",
+                  "    }",
+                  "    const target = pm.variables.replaceIn('/api/transactions/{{transfer_id}}');",
+                  "    const stamp = String(Math.floor(Date.now()/1000));",
+                  "    const nonce = pm.variables.replaceIn('{{$guid}}');",
+                  "    const canonical = ['GET',target,stamp,nonce,pollCrypto.SHA256('').toString(),''].join('\\n');",
+                  "    const secret = pm.environment.get('ALICE_HMAC_KEY');",
+                  "    pm.sendRequest({",
+                  "        url:pm.variables.replaceIn('{{base_url}}')+target,method:'GET',",
+                  "        header:{'X-Client-Id':'alice','X-Timestamp':stamp,'X-Nonce':nonce,'X-Signature':pollCrypto.HmacSHA256(canonical,secret).toString()}",
+                  "    },function (error,response) {",
+                  "        if (error || !response || response.code !== 200) {",
+                  "            pm.test('Polling GET succeeds',function () { pm.expect(error).to.equal(null); pm.expect(response && response.code).to.eql(200); });",
+                  "            return;",
+                  "        }",
+                  "        const value = response.json();",
+                  "        if (['COMPLETED','REJECTED'].includes(value.status)) finish(value); else setTimeout(again,500);",
+                  "    });",
+                  "}",
+                  "again();"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Retry same transfer and key",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{transfer_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Retry same transfer and key",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200, 202]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"One durable transfer ID\",function () { const value=pm.response.json(); pm.expect(value.id).to.eql(pm.variables.get('transfer_id')); });",
+                  "const pollCrypto = require('crypto-js');",
+                  "let attempts = 0;",
+                  "function finish(value) {",
+                  "    pm.test('Terminal result matches the expected outcome',function () {",
+                  "        pm.expect(value.status).to.eql('COMPLETED');",
+                  "pm.expect(value.id).to.match(/^[0-9a-f-]{36}$/);",
+                  "    });",
+                  "    ",
+                  "}",
+                  "function again() {",
+                  "    if (++attempts > 40) {",
+                  "        pm.test('Operation resolves within 20 seconds',function () { throw new Error('Timed out awaiting terminal API state. Keep the same operation ID and idempotency key.'); });",
+                  "        return;",
+                  "    }",
+                  "    const target = pm.variables.replaceIn('/api/transactions/{{transfer_id}}');",
+                  "    const stamp = String(Math.floor(Date.now()/1000));",
+                  "    const nonce = pm.variables.replaceIn('{{$guid}}');",
+                  "    const canonical = ['GET',target,stamp,nonce,pollCrypto.SHA256('').toString(),''].join('\\n');",
+                  "    const secret = pm.environment.get('ALICE_HMAC_KEY');",
+                  "    pm.sendRequest({",
+                  "        url:pm.variables.replaceIn('{{base_url}}')+target,method:'GET',",
+                  "        header:{'X-Client-Id':'alice','X-Timestamp':stamp,'X-Nonce':nonce,'X-Signature':pollCrypto.HmacSHA256(canonical,secret).toString()}",
+                  "    },function (error,response) {",
+                  "        if (error || !response || response.code !== 200) {",
+                  "            pm.test('Polling GET succeeds',function () { pm.expect(error).to.equal(null); pm.expect(response && response.code).to.eql(200); });",
+                  "            return;",
+                  "        }",
+                  "        const value = response.json();",
+                  "        if (['COMPLETED','REJECTED'].includes(value.status)) finish(value); else setTimeout(again,500);",
+                  "    });",
+                  "}",
+                  "again();"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Same key with changed amount is rejected",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{transfer_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Same key with changed amount is rejected",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1001,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([409]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Read completed transfer",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transactions/{{transfer_id}}",
+            "description": "Read completed transfer"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Transfer fields and journal are stable\",function () { const value=pm.response.json(); pm.expect(value.status).to.eql('COMPLETED'); pm.expect(value.source_account).to.eql(pm.variables.get('alice_account')); pm.expect(value.destination_account).to.eql(pm.variables.get('bob_account')); pm.expect(value.journal_id).to.eql(pm.variables.get('transfer_journal_id')); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Alice journal has exactly one transfer debit",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts/{{alice_account}}/entries",
+            "description": "Alice journal has exactly one transfer debit"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Exactly one debit entry\",function () { const value=pm.response.json(); const rows=value.filter(e=>e.journalId===pm.variables.get('transfer_journal_id')); pm.expect(rows).to.have.lengthOf(1); pm.expect(rows[0].amount).to.eql(-1000); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Alice after transfer",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts/{{alice_account}}",
+            "description": "Alice after transfer"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Exact wallet balance in VND\",function () { const value=pm.response.json(); pm.expect(value.balance).to.eql(99000); pm.expect(value.currency).to.eql('VND'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "05 - Withdrawal and merchant payment",
+      "description": "Withdraw 500 VND, pay 500 VND to the new merchant, and verify asynchronous payment status reaches COMPLETED.",
+      "item": [
+        {
+          "name": "Withdrawal 500 VND",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{withdrawal_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/withdrawals",
+            "description": "Withdrawal 500 VND",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"accountId\":\"{{alice_account}}\",\"amount\":500}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.collectionVariables.set('withdrawal_id',pm.response.json().id);",
+                  "",
+                  "const pollCrypto = require('crypto-js');",
+                  "let attempts = 0;",
+                  "function finish(value) {",
+                  "    pm.test('Terminal result matches the expected outcome',function () {",
+                  "        pm.expect(value.status).to.eql('COMPLETED');",
+                  "pm.expect(value.id).to.match(/^[0-9a-f-]{36}$/);",
+                  "    });",
+                  "    ",
+                  "}",
+                  "function again() {",
+                  "    if (++attempts > 40) {",
+                  "        pm.test('Operation resolves within 20 seconds',function () { throw new Error('Timed out awaiting terminal API state. Keep the same operation ID and idempotency key.'); });",
+                  "        return;",
+                  "    }",
+                  "    const target = pm.variables.replaceIn('/api/payments/{{withdrawal_id}}');",
+                  "    const stamp = String(Math.floor(Date.now()/1000));",
+                  "    const nonce = pm.variables.replaceIn('{{$guid}}');",
+                  "    const canonical = ['GET',target,stamp,nonce,pollCrypto.SHA256('').toString(),''].join('\\n');",
+                  "    const secret = pm.environment.get('ALICE_HMAC_KEY');",
+                  "    pm.sendRequest({",
+                  "        url:pm.variables.replaceIn('{{base_url}}')+target,method:'GET',",
+                  "        header:{'X-Client-Id':'alice','X-Timestamp':stamp,'X-Nonce':nonce,'X-Signature':pollCrypto.HmacSHA256(canonical,secret).toString()}",
+                  "    },function (error,response) {",
+                  "        if (error || !response || response.code !== 200) {",
+                  "            pm.test('Polling GET succeeds',function () { pm.expect(error).to.equal(null); pm.expect(response && response.code).to.eql(200); });",
+                  "            return;",
+                  "        }",
+                  "        const value = response.json();",
+                  "        if (['COMPLETED','REJECTED'].includes(value.status)) finish(value); else setTimeout(again,500);",
+                  "    });",
+                  "}",
+                  "again();"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Read completed withdrawal",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/payments/{{withdrawal_id}}",
+            "description": "Read completed withdrawal"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Payment is final\",function () { const value=pm.response.json(); pm.expect(value.status).to.eql('COMPLETED'); pm.expect(value.amount).to.eql(500); pm.expect(value.transaction_id).to.match(/^[0-9a-f-]{36}$/); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Merchant payment 500 VND",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{merchant_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/payments",
+            "description": "Merchant payment 500 VND",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"accountId\":\"{{alice_account}}\",\"destination\":\"{{merchant_account}}\",\"amount\":500}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.collectionVariables.set('merchant_payment_id',pm.response.json().id);",
+                  "",
+                  "const pollCrypto = require('crypto-js');",
+                  "let attempts = 0;",
+                  "function finish(value) {",
+                  "    pm.test('Terminal result matches the expected outcome',function () {",
+                  "        pm.expect(value.status).to.eql('COMPLETED');",
+                  "pm.expect(value.id).to.match(/^[0-9a-f-]{36}$/);",
+                  "    });",
+                  "    ",
+                  "}",
+                  "function again() {",
+                  "    if (++attempts > 40) {",
+                  "        pm.test('Operation resolves within 20 seconds',function () { throw new Error('Timed out awaiting terminal API state. Keep the same operation ID and idempotency key.'); });",
+                  "        return;",
+                  "    }",
+                  "    const target = pm.variables.replaceIn('/api/payments/{{merchant_payment_id}}');",
+                  "    const stamp = String(Math.floor(Date.now()/1000));",
+                  "    const nonce = pm.variables.replaceIn('{{$guid}}');",
+                  "    const canonical = ['GET',target,stamp,nonce,pollCrypto.SHA256('').toString(),''].join('\\n');",
+                  "    const secret = pm.environment.get('ALICE_HMAC_KEY');",
+                  "    pm.sendRequest({",
+                  "        url:pm.variables.replaceIn('{{base_url}}')+target,method:'GET',",
+                  "        header:{'X-Client-Id':'alice','X-Timestamp':stamp,'X-Nonce':nonce,'X-Signature':pollCrypto.HmacSHA256(canonical,secret).toString()}",
+                  "    },function (error,response) {",
+                  "        if (error || !response || response.code !== 200) {",
+                  "            pm.test('Polling GET succeeds',function () { pm.expect(error).to.equal(null); pm.expect(response && response.code).to.eql(200); });",
+                  "            return;",
+                  "        }",
+                  "        const value = response.json();",
+                  "        if (['COMPLETED','REJECTED'].includes(value.status)) finish(value); else setTimeout(again,500);",
+                  "    });",
+                  "}",
+                  "again();"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Read completed merchant payment",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/payments/{{merchant_payment_id}}",
+            "description": "Read completed merchant payment"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Payment is final\",function () { const value=pm.response.json(); pm.expect(value.status).to.eql('COMPLETED'); pm.expect(value.amount).to.eql(500); pm.expect(value.transaction_id).to.match(/^[0-9a-f-]{36}$/); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "06 - Rejected transactions",
+      "description": "Exercises the amount risk rule and insufficient funds only against wallets from this run. Rejected transactions must have no journal and leave balances unchanged.",
+      "item": [
+        {
+          "name": "Amount limit rejects 300000000 VND transfer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{risk_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Amount limit rejects 300000000 VND transfer",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":300000000,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([202, 422]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.collectionVariables.set('risk_transaction_id',pm.response.json().id);",
+                  "",
+                  "const pollCrypto = require('crypto-js');",
+                  "let attempts = 0;",
+                  "function finish(value) {",
+                  "    pm.test('Terminal result matches the expected outcome',function () {",
+                  "        pm.expect(value.status).to.eql('REJECTED'); pm.expect(value.error_code).to.eql('RISK_REJECTED'); pm.expect(value.journal_id).to.equal(null);",
+                  "    });",
+                  "    ",
+                  "}",
+                  "function again() {",
+                  "    if (++attempts > 40) {",
+                  "        pm.test('Operation resolves within 20 seconds',function () { throw new Error('Timed out awaiting terminal API state. Keep the same operation ID and idempotency key.'); });",
+                  "        return;",
+                  "    }",
+                  "    const target = pm.variables.replaceIn('/api/transactions/{{risk_transaction_id}}');",
+                  "    const stamp = String(Math.floor(Date.now()/1000));",
+                  "    const nonce = pm.variables.replaceIn('{{$guid}}');",
+                  "    const canonical = ['GET',target,stamp,nonce,pollCrypto.SHA256('').toString(),''].join('\\n');",
+                  "    const secret = pm.environment.get('ALICE_HMAC_KEY');",
+                  "    pm.sendRequest({",
+                  "        url:pm.variables.replaceIn('{{base_url}}')+target,method:'GET',",
+                  "        header:{'X-Client-Id':'alice','X-Timestamp':stamp,'X-Nonce':nonce,'X-Signature':pollCrypto.HmacSHA256(canonical,secret).toString()}",
+                  "    },function (error,response) {",
+                  "        if (error || !response || response.code !== 200) {",
+                  "            pm.test('Polling GET succeeds',function () { pm.expect(error).to.equal(null); pm.expect(response && response.code).to.eql(200); });",
+                  "            return;",
+                  "        }",
+                  "        const value = response.json();",
+                  "        if (['COMPLETED','REJECTED'].includes(value.status)) finish(value); else setTimeout(again,500);",
+                  "    });",
+                  "}",
+                  "again();"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Bob cannot withdraw 100000 VND",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "bob"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{insufficient_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/withdrawals",
+            "description": "Bob cannot withdraw 100000 VND",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"accountId\":\"{{bob_account}}\",\"amount\":100000}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.collectionVariables.set('insufficient_id',pm.response.json().id);",
+                  "",
+                  "const pollCrypto = require('crypto-js');",
+                  "let attempts = 0;",
+                  "function finish(value) {",
+                  "    pm.test('Terminal result matches the expected outcome',function () {",
+                  "        pm.expect(value.status).to.eql('REJECTED');",
+                  "    });",
+                  "    ",
+                  "}",
+                  "function again() {",
+                  "    if (++attempts > 40) {",
+                  "        pm.test('Operation resolves within 20 seconds',function () { throw new Error('Timed out awaiting terminal API state. Keep the same operation ID and idempotency key.'); });",
+                  "        return;",
+                  "    }",
+                  "    const target = pm.variables.replaceIn('/api/payments/{{insufficient_id}}');",
+                  "    const stamp = String(Math.floor(Date.now()/1000));",
+                  "    const nonce = pm.variables.replaceIn('{{$guid}}');",
+                  "    const canonical = ['GET',target,stamp,nonce,pollCrypto.SHA256('').toString(),''].join('\\n');",
+                  "    const secret = pm.environment.get('BOB_HMAC_KEY');",
+                  "    pm.sendRequest({",
+                  "        url:pm.variables.replaceIn('{{base_url}}')+target,method:'GET',",
+                  "        header:{'X-Client-Id':'bob','X-Timestamp':stamp,'X-Nonce':nonce,'X-Signature':pollCrypto.HmacSHA256(canonical,secret).toString()}",
+                  "    },function (error,response) {",
+                  "        if (error || !response || response.code !== 200) {",
+                  "            pm.test('Polling GET succeeds',function () { pm.expect(error).to.equal(null); pm.expect(response && response.code).to.eql(200); });",
+                  "            return;",
+                  "        }",
+                  "        const value = response.json();",
+                  "        if (['COMPLETED','REJECTED'].includes(value.status)) finish(value); else setTimeout(again,500);",
+                  "    });",
+                  "}",
+                  "again();"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Alice final balance 98000 VND",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts/{{alice_account}}",
+            "description": "Alice final balance 98000 VND"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Exact wallet balance in VND\",function () { const value=pm.response.json(); pm.expect(value.balance).to.eql(98000); pm.expect(value.currency).to.eql('VND'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Bob final balance 1000 VND",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "bob"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts/{{bob_account}}",
+            "description": "Bob final balance 1000 VND"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Exact wallet balance in VND\",function () { const value=pm.response.json(); pm.expect(value.balance).to.eql(1000); pm.expect(value.currency).to.eql('VND'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Merchant final balance 500 VND",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "admin"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts/{{merchant_account}}",
+            "description": "Merchant final balance 500 VND"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Exact wallet balance in VND\",function () { const value=pm.response.json(); pm.expect(value.balance).to.eql(500); pm.expect(value.currency).to.eql('VND'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "07 - Ledger, audit and notifications",
+      "description": "Checks global ledger invariants and waits for outbox/audit propagation. Reconciliation includes all local wallets; it does not reset or erase existing data.",
+      "item": [
+        {
+          "name": "Ledger reconciliation",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "admin"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/reconciliation",
+            "description": "Ledger reconciliation"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "",
+                  "const pollCrypto = require('crypto-js');",
+                  "let attempts = 0;",
+                  "function finish(value) {",
+                  "    pm.test('Terminal result matches the expected outcome',function () {",
+                  "        pm.expect(value.ledger.totalAmount).to.eql(0); pm.expect(value.ledger.unbalancedJournals).to.eql(0); pm.expect(value.ledger.negativeUserAccounts).to.eql(0); pm.expect(value.outboxPending).to.eql(0);",
+                  "    });",
+                  "    pm.collectionVariables.set('ledger_journals',value.ledger.journalCount);",
+                  "}",
+                  "function again() {",
+                  "    if (++attempts > 40) {",
+                  "        pm.test('Operation resolves within 20 seconds',function () { throw new Error('Timed out awaiting terminal API state. Keep the same operation ID and idempotency key.'); });",
+                  "        return;",
+                  "    }",
+                  "    const target = pm.variables.replaceIn('/api/reconciliation');",
+                  "    const stamp = String(Math.floor(Date.now()/1000));",
+                  "    const nonce = pm.variables.replaceIn('{{$guid}}');",
+                  "    const canonical = ['GET',target,stamp,nonce,pollCrypto.SHA256('').toString(),''].join('\\n');",
+                  "    const secret = pm.environment.get('ADMIN_HMAC_KEY');",
+                  "    pm.sendRequest({",
+                  "        url:pm.variables.replaceIn('{{base_url}}')+target,method:'GET',",
+                  "        header:{'X-Client-Id':'admin','X-Timestamp':stamp,'X-Nonce':nonce,'X-Signature':pollCrypto.HmacSHA256(canonical,secret).toString()}",
+                  "    },function (error,response) {",
+                  "        if (error || !response || response.code !== 200) {",
+                  "            pm.test('Polling GET succeeds',function () { pm.expect(error).to.equal(null); pm.expect(response && response.code).to.eql(200); });",
+                  "            return;",
+                  "        }",
+                  "        const value = response.json();",
+                  "        if (value.outboxPending===0) finish(value); else setTimeout(again,500);",
+                  "    });",
+                  "}",
+                  "again();"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Audit hash-chain reconciliation",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "admin"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/audit/reconciliation",
+            "description": "Audit hash-chain reconciliation"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "",
+                  "const pollCrypto = require('crypto-js');",
+                  "let attempts = 0;",
+                  "function finish(value) {",
+                  "    pm.test('Terminal result matches the expected outcome',function () {",
+                  "        pm.expect(value.valid).to.eql(true); pm.expect(value.verifiedEvents).to.be.at.least(Number(pm.variables.get('ledger_journals'))); pm.expect(value.lastHash).to.match(/^[0-9a-f]{64}$/);",
+                  "    });",
+                  "    ",
+                  "}",
+                  "function again() {",
+                  "    if (++attempts > 40) {",
+                  "        pm.test('Operation resolves within 20 seconds',function () { throw new Error('Timed out awaiting terminal API state. Keep the same operation ID and idempotency key.'); });",
+                  "        return;",
+                  "    }",
+                  "    const target = pm.variables.replaceIn('/api/audit/reconciliation');",
+                  "    const stamp = String(Math.floor(Date.now()/1000));",
+                  "    const nonce = pm.variables.replaceIn('{{$guid}}');",
+                  "    const canonical = ['GET',target,stamp,nonce,pollCrypto.SHA256('').toString(),''].join('\\n');",
+                  "    const secret = pm.environment.get('ADMIN_HMAC_KEY');",
+                  "    pm.sendRequest({",
+                  "        url:pm.variables.replaceIn('{{base_url}}')+target,method:'GET',",
+                  "        header:{'X-Client-Id':'admin','X-Timestamp':stamp,'X-Nonce':nonce,'X-Signature':pollCrypto.HmacSHA256(canonical,secret).toString()}",
+                  "    },function (error,response) {",
+                  "        if (error || !response || response.code !== 200) {",
+                  "            pm.test('Polling GET succeeds',function () { pm.expect(error).to.equal(null); pm.expect(response && response.code).to.eql(200); });",
+                  "            return;",
+                  "        }",
+                  "        const value = response.json();",
+                  "        if (value.verifiedEvents>=Number(pm.variables.get('ledger_journals'))) finish(value); else setTimeout(again,500);",
+                  "    });",
+                  "}",
+                  "again();"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Alice transaction notifications",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/notifications",
+            "description": "Alice transaction notifications"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Alice sees the transfer notification\",function () { const value=pm.response.json(); pm.expect(value).to.be.an('array'); pm.expect(value.some(e=>e.event_id===pm.variables.get('transfer_id'))).to.eql(true); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Admin audit events",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "admin"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/audit/events",
+            "description": "Admin audit events"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Audit includes this run's transfer\",function () { const value=pm.response.json(); pm.expect(value).to.be.an('array'); pm.expect(value.some(e=>e.event_id===pm.variables.get('transfer_id'))).to.eql(true); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Admin risk flags",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "admin"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/risk/flags",
+            "description": "Admin risk flags"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Risk flag explains the rejection\",function () { const value=pm.response.json(); pm.expect(value).to.be.an('array'); pm.expect(value.some(e=>e.transaction_id===pm.variables.get('risk_transaction_id')&&e.reason==='AMOUNT_LIMIT')).to.eql(true); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "08 - Input validation",
+      "description": "Every financial request here must be rejected before creating a transaction. VND must be an integer in (0, 9e15]. Invalid requests use a separate key, never a successful operation's key.",
+      "item": [
+        {
+          "name": "Reject amount null",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject amount null",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":null,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject amount zero",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject amount zero",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":0,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject amount negative",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject amount negative",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":-1,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject amount fractional",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject amount fractional",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1.5,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject amount string",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject amount string",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":\"1\",\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject amount boolean",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject amount boolean",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":true,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject amount above VND ceiling",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject amount above VND ceiling",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":9000000000000001,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject amount long overflow",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject amount long overflow",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":9223372036854775808,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject unknown JSON field",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject unknown JSON field",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\",\"currency\":\"USD\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject missing source",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject missing source",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"destinationAccount\":\"{{bob_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject self transfer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject self transfer",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{alice_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject invalid account identifier",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject invalid account identifier",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"bad/id\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject duplicate JSON amount",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject duplicate JSON amount",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\",\"amount\":2}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject deep JSON",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject deep JSON",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"amount\":[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject malformed transaction UUID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transactions/not-uuid",
+            "description": "Reject malformed transaction UUID"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject signed missing idempotency key",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject signed missing idempotency key",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject signed malformed idempotency key",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "invalid"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject signed malformed idempotency key",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "09 - Authentication and authorization",
+      "description": "Negative HMAC cases mutate headers only AFTER collection signing. Nonce replay is distinct from idempotency retry. These requests must not affect balances.",
+      "item": [
+        {
+          "name": "Reject missing signature",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject missing signature",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.request.headers.remove('X-Signature');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([401]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject altered signature",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject altered signature",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.request.headers.upsert({key:'X-Signature',value:'0'.repeat(64)});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([401]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject key changed after signing",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject key changed after signing",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.request.headers.upsert({key:'X-Idempotency-Key',value:pm.variables.replaceIn('{{$guid}}')});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([401]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject key removed after signing",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "X-Idempotency-Key",
+                "value": "{{invalid_key}}"
+              }
+            ],
+            "url": "{{base_url}}/api/transfers",
+            "description": "Reject key removed after signing",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"sourceAccount\":\"{{alice_account}}\",\"destinationAccount\":\"{{bob_account}}\",\"amount\":1000,\"kind\":\"TRANSFER\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.request.headers.remove('X-Idempotency-Key');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([401]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Bob cannot read Alice wallet",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "bob"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts/{{alice_account}}",
+            "description": "Bob cannot read Alice wallet"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([403]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Alice cannot access admin risk flags",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/risk/flags",
+            "description": "Alice cannot access admin risk flags"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([403]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Bob cannot read Alice payment",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "bob"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/payments/{{deposit_id}}",
+            "description": "Bob cannot read Alice payment"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([403]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "First use of fixed nonce",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{replay_nonce}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts/{{alice_account}}?view=summary",
+            "description": "First use of fixed nonce"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Signed raw path and query are accepted\",function () { const value=pm.response.json(); pm.expect(value.balance).to.eql(98000); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Reject replayed nonce",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{replay_nonce}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts/{{alice_account}}?view=summary",
+            "description": "Reject replayed nonce"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([409]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "10 - Internal Bank and Fraud boundaries",
+      "description": "Direct service calls use INTERNAL_TOKEN, never Gateway client HMAC. Only invalid commands are submitted here; no extra bank payment or risk decision is created.",
+      "item": [
+        {
+          "name": "Bank rejects missing internal token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{bank_url}}/payments",
+            "description": "Bank rejects missing internal token",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"payment_id\":\"{{internal_operation_id}}\",\"amount\":1}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([401]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Bank rejects string amount",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Token",
+                "value": "{{INTERNAL_TOKEN}}"
+              }
+            ],
+            "url": "{{bank_url}}/payments",
+            "description": "Bank rejects string amount",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"payment_id\":\"{{internal_operation_id}}\",\"amount\":\"1\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([422]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Bank rejects unknown field",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Token",
+                "value": "{{INTERNAL_TOKEN}}"
+              }
+            ],
+            "url": "{{bank_url}}/payments",
+            "description": "Bank rejects unknown field",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"payment_id\":\"{{internal_operation_id}}\",\"amount\":1,\"trusted\":true}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([422]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Bank rejects JSON depth 17",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Token",
+                "value": "{{INTERNAL_TOKEN}}"
+              }
+            ],
+            "url": "{{bank_url}}/payments",
+            "description": "Bank rejects JSON depth 17",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"value\":[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([422]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Invalid deep JSON never returns 500\",function () { const value=pm.response.json(); pm.expect(value.code).to.eql('INVALID_JSON'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Bank rejects JSON depth 1501",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Token",
+                "value": "{{INTERNAL_TOKEN}}"
+              }
+            ],
+            "url": "{{bank_url}}/payments",
+            "description": "Bank rejects JSON depth 1501",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"value\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([422]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Invalid deep JSON never returns 500\",function () { const value=pm.response.json(); pm.expect(value.code).to.eql('INVALID_JSON'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Fraud rejects missing internal token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{fraud_url}}/check",
+            "description": "Fraud rejects missing internal token",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"transaction_id\":\"{{internal_operation_id}}\",\"user_id\":\"alice\",\"amount\":1,\"ip\":\"local\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([401]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Fraud rejects string amount",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Token",
+                "value": "{{INTERNAL_TOKEN}}"
+              }
+            ],
+            "url": "{{fraud_url}}/check",
+            "description": "Fraud rejects string amount",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"transaction_id\":\"{{internal_operation_id}}\",\"user_id\":\"alice\",\"amount\":\"1\",\"ip\":\"local\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([422]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Fraud rejects unknown field",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Token",
+                "value": "{{INTERNAL_TOKEN}}"
+              }
+            ],
+            "url": "{{fraud_url}}/check",
+            "description": "Fraud rejects unknown field",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"transaction_id\":\"{{internal_operation_id}}\",\"user_id\":\"alice\",\"amount\":1,\"ip\":\"local\",\"trusted\":true}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([422]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Fraud rejects JSON depth 17",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Token",
+                "value": "{{INTERNAL_TOKEN}}"
+              }
+            ],
+            "url": "{{fraud_url}}/check",
+            "description": "Fraud rejects JSON depth 17",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"value\":[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([422]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Invalid deep JSON never returns 500\",function () { const value=pm.response.json(); pm.expect(value.code).to.eql('INVALID_JSON'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Fraud rejects JSON depth 1501",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Token",
+                "value": "{{INTERNAL_TOKEN}}"
+              }
+            ],
+            "url": "{{fraud_url}}/check",
+            "description": "Fraud rejects JSON depth 1501",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"value\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[0]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([422]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Invalid deep JSON never returns 500\",function () { const value=pm.response.json(); pm.expect(value.code).to.eql('INVALID_JSON'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Bank rejects malformed settlement UUID",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Token",
+                "value": "{{INTERNAL_TOKEN}}"
+              }
+            ],
+            "url": "{{bank_url}}/settle",
+            "description": "Bank rejects malformed settlement UUID",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"payment_id\":\"bad\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([422]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Fraud rejects invalid IP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Internal-Token",
+                "value": "{{INTERNAL_TOKEN}}"
+              }
+            ],
+            "url": "{{fraud_url}}/check",
+            "description": "Fraud rejects invalid IP",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"transaction_id\":\"{{internal_operation_id}}\",\"user_id\":\"alice\",\"amount\":1,\"ip\":\"local\\nspoof\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([422]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "11 - Bank webhook contract",
+      "description": "Uses the completed deposit from this run and its actual provider reference. A duplicate valid callback must reuse the same transaction; invalid callbacks cannot mint money. Bank HMAC intentionally uses its distinct five-line canonical format.",
+      "item": [
+        {
+          "name": "Webhook rejects missing bank signature",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{payment_url}}/internal/webhook",
+            "description": "Webhook rejects missing bank signature",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"payment_id\":\"{{deposit_id}}\",\"provider_reference\":\"{{deposit_reference}}\",\"amount\":100000,\"status\":\"PAID\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([401]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Webhook rejects wrong amount",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Bank-Signature",
+                "value": "{{BANK_SECRET}}"
+              }
+            ],
+            "url": "{{payment_url}}/internal/webhook",
+            "description": "Webhook rejects wrong amount",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"payment_id\":\"{{deposit_id}}\",\"provider_reference\":\"{{deposit_reference}}\",\"amount\":100001,\"status\":\"PAID\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Webhook rejects string amount",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Bank-Signature",
+                "value": "{{BANK_SECRET}}"
+              }
+            ],
+            "url": "{{payment_url}}/internal/webhook",
+            "description": "Webhook rejects string amount",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"payment_id\":\"{{deposit_id}}\",\"provider_reference\":\"{{deposit_reference}}\",\"amount\":\"100000\",\"status\":\"PAID\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Webhook rejects wrong status",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Bank-Signature",
+                "value": "{{BANK_SECRET}}"
+              }
+            ],
+            "url": "{{payment_url}}/internal/webhook",
+            "description": "Webhook rejects wrong status",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"payment_id\":\"{{deposit_id}}\",\"provider_reference\":\"{{deposit_reference}}\",\"amount\":100000,\"status\":\"PENDING\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Webhook rejects unknown field",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Bank-Signature",
+                "value": "{{BANK_SECRET}}"
+              }
+            ],
+            "url": "{{payment_url}}/internal/webhook",
+            "description": "Webhook rejects unknown field",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"payment_id\":\"{{deposit_id}}\",\"provider_reference\":\"{{deposit_reference}}\",\"amount\":100000,\"status\":\"PAID\",\"credit\":true}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Webhook rejects duplicate JSON field",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Bank-Signature",
+                "value": "{{BANK_SECRET}}"
+              }
+            ],
+            "url": "{{payment_url}}/internal/webhook",
+            "description": "Webhook rejects duplicate JSON field",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"payment_id\":\"{{deposit_id}}\",\"provider_reference\":\"{{deposit_reference}}\",\"amount\":100000,\"status\":\"PAID\",\"amount\":100000}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([400]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Same completed bank callback is idempotent",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Bank-Signature",
+                "value": "{{BANK_SECRET}}"
+              }
+            ],
+            "url": "{{payment_url}}/internal/webhook",
+            "description": "Same completed bank callback is idempotent",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"payment_id\":\"{{deposit_id}}\",\"provider_reference\":\"{{deposit_reference}}\",\"amount\":100000,\"status\":\"PAID\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Callback creates no second transaction\",function () { const value=pm.response.json(); pm.expect(value.status).to.eql('COMPLETED'); pm.expect(value.id).to.eql(pm.variables.get('deposit_id')); pm.expect(value.transaction_id).to.eql(pm.variables.get('deposit_transaction_id')); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Final Alice balance unchanged by all negative requests",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Client-Id",
+                "value": "alice"
+              },
+              {
+                "key": "X-Nonce",
+                "value": "{{$guid}}"
+              }
+            ],
+            "url": "{{base_url}}/api/accounts/{{alice_account}}",
+            "description": "Final Alice balance unchanged by all negative requests"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP status',function () { pm.expect(pm.response.code).to.be.oneOf([200]); });",
+                  "pm.test('Response is JSON',function () { pm.response.to.be.json; });",
+                  "pm.test(\"Exact wallet balance in VND\",function () { const value=pm.response.json(); pm.expect(value.balance).to.eql(98000); pm.expect(value.currency).to.eql('VND'); });"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    }
+  ]
+}
