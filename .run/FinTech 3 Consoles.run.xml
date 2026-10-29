@@ -1,0 +1,10 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="FinTech 3 Consoles" type="CompoundRunConfigurationType">
+    <toRun name="FinTech Alice" type="Application" />
+    <toRun name="FinTech Bob" type="Application" />
+    <toRun name="FinTech Admin" type="Application" />
+    <method v="2">
+      <option name="Gradle.BeforeRunTask" enabled="true" tasks="prepareLocal" externalProjectPath="$PROJECT_DIR$" />
+    </method>
+  </configuration>
+</component>

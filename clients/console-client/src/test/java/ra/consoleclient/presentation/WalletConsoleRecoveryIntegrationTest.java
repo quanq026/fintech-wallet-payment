@@ -10,6 +10,8 @@ import ra.consoleclient.client.WalletApiClient.Response;
 
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
 import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -19,13 +21,87 @@ import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-// Uses the local Gateway and MySQL ledger; only the accepted response is intentionally lost.
+// Exercises concurrent consoles and lost-response recovery against the local Gateway and MySQL ledger.
 @EnabledIfEnvironmentVariable(named = "CONSOLE_INTEGRATION_TEST", matches = "true")
 class WalletConsoleRecoveryIntegrationTest {
     private static final ObjectMapper JSON = new ObjectMapper();
+
+    @Test
+    void threeAccountConsolesObserveTransfersAndPaymentsWithoutInput(@TempDir Path directory) throws Exception {
+        WalletApiClient api = new WalletApiClient();
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String alice = "live-alice-" + suffix, bob = "live-bob-" + suffix, merchant = "live-shop-" + suffix;
+        var wallets = List.of(Map.of("accountId", alice, "ownerId", "alice", "kind", "USER"),
+                Map.of("accountId", bob, "ownerId", "bob", "kind", "USER"),
+                Map.of("accountId", merchant, "ownerId", "admin", "kind", "MERCHANT"));
+        for (var wallet : wallets) request(api, "admin", "POST", "/api/accounts", wallet, null);
+        Response clearing = api.request("admin", "POST", "/api/accounts",
+                Map.of("accountId", "bank-clearing", "ownerId", "admin", "kind", "CLEARING"), null);
+        assertTrue(clearing.successful() || clearing.status() == 409);
+        JsonNode deposit = request(api, "alice", "POST", "/api/deposits",
+                Map.of("accountId", alice, "amount", 10_000L), UUID.randomUUID().toString());
+        request(api, "alice", "POST", "/api/bank/settle/" + deposit.path("id").asText(), Map.of(), null);
+        awaitCompleted(api, "alice", "/api/payments/" + deposit.path("id").asText());
+        Path legacy = directory.resolve("console-wallets.json");
+        JSON.writeValue(legacy.toFile(), Map.of("user", "alice", "wallets", wallets,
+                "selected", Map.of("alice", alice, "bob", bob, "admin", merchant)));
+
+        var inputs = new ArrayList<PipedInputStream>();
+        var writers = new ArrayList<PipedOutputStream>();
+        var outputs = new ArrayList<ByteArrayOutputStream>();
+        var pool = Executors.newFixedThreadPool(3);
+        var runs = new ArrayList<java.util.concurrent.Future<?>>();
+        try {
+            for (String actor : List.of("alice", "bob", "admin")) {
+                PipedInputStream input = new PipedInputStream();
+                PipedOutputStream writer = new PipedOutputStream(input);
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                inputs.add(input); writers.add(writer); outputs.add(output);
+                WalletConsole console = new WalletConsole(new Scanner(input, StandardCharsets.UTF_8),
+                        new PrintStream(output, true, StandardCharsets.UTF_8), new WalletApiClient(), legacy, actor);
+                runs.add(pool.submit(console::run));
+            }
+            for (var output : outputs) awaitOutput(output, "Chọn số > ");
+            assertTrue(outputs.stream().noneMatch(output -> output.toString(StandardCharsets.UTF_8).contains("Đã khóa gửi tiền")));
+            writers.get(0).write("3\n1\n1000\n1\n\n".getBytes(StandardCharsets.UTF_8));
+            writers.get(0).flush();
+            awaitOutput(outputs.get(1), "Số dư ví " + bob + ": 1.000 VND");
+            awaitOutput(outputs.get(0), "Số dư hiện tại: 9.000 VND");
+
+            writers.get(0).write("4\n1\n1\n500\n1\n\n".getBytes(StandardCharsets.UTF_8));
+            writers.get(0).flush();
+            awaitOutput(outputs.get(2), "Số dư ví " + merchant + ": 500 VND");
+            awaitOutput(outputs.get(0), "Số dư hiện tại: 8.500 VND");
+            assertEquals(8_500, balance(api, "alice", alice));
+            assertEquals(1_000, balance(api, "bob", bob));
+            assertEquals(500, balance(api, "admin", merchant));
+        } finally {
+            for (var writer : writers) {
+                try { writer.write("0\n".getBytes(StandardCharsets.UTF_8)); writer.flush(); }
+                catch (java.io.IOException ignored) { }
+            }
+            try {
+                for (var run : runs) run.get(10, TimeUnit.SECONDS);
+            } finally {
+                for (var writer : writers) writer.close();
+                for (var input : inputs) input.close();
+                pool.shutdownNow();
+            }
+        }
+    }
+
+    private static void awaitOutput(ByteArrayOutputStream output, String expected) throws InterruptedException {
+        for (int attempt = 0; attempt < 120; attempt++) {
+            if (output.toString(StandardCharsets.UTF_8).contains(expected)) return;
+            Thread.sleep(100);
+        }
+        fail("Missing console update: " + expected + "\n" + output.toString(StandardCharsets.UTF_8));
+    }
 
     @Test
     void acceptedTransferSurvivesConsoleRestartAndDebitsExactlyOnce(@TempDir Path directory) throws Exception {

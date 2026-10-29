@@ -452,6 +452,172 @@ class WalletConsoleTest {
         assertTrue(output.contains("HOÀN TẤT — đã ghi nhận tiền"));
     }
 
+    @Test
+    void separateAccountsCanOpenTogetherButSameAccountCannotWriteTwice(@TempDir Path directory) throws Exception {
+        Path legacy = directory.resolve("console-wallets.json");
+        FakeClient client = new FakeClient(call -> accounts(call, 100_000));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (Scanner aliceInput = new Scanner("0\n"); Scanner bobInput = new Scanner("0\n");
+             Scanner adminInput = new Scanner("0\n"); PrintStream stream = new PrintStream(output)) {
+            WalletConsole alice = new WalletConsole(aliceInput, stream, client, legacy, "alice");
+            WalletConsole bob = new WalletConsole(bobInput, stream, client, legacy, "bob");
+            WalletConsole admin = new WalletConsole(adminInput, stream, client, legacy, "admin");
+            try {
+                assertFalse(output.toString(StandardCharsets.UTF_8).contains("Đã khóa gửi tiền"));
+                assertTrue(Files.isRegularFile(directory.resolve("console/alice/console-requests.json")));
+                assertTrue(Files.isRegularFile(directory.resolve("console/bob/console-requests.json")));
+                assertTrue(Files.isRegularFile(directory.resolve("console/admin/console-requests.json")));
+                Path aliceBookmarks = directory.resolve("console/alice/console-wallets.json");
+                byte[] originalBookmarks = Files.readAllBytes(aliceBookmarks);
+                String duplicate = runProfile(openAlice() + "2\n10000\n1\n\n0\n", client, legacy, "alice");
+                assertTrue(duplicate.contains("Không đọc/khóa được file lệnh đã lưu"));
+                assertTrue(posts(client).isEmpty());
+                assertArrayEquals(originalBookmarks, Files.readAllBytes(aliceBookmarks));
+            } finally {
+                alice.run(); bob.run(); admin.run();
+            }
+        }
+        assertFalse(Files.exists(directory.resolve("console-requests.json")), "Migration must not create a legacy journal");
+    }
+
+    @Test
+    void accountProfileRestoresOnlyItsOwnLegacyIntentAndKeepsTheOriginalKey(@TempDir Path directory) throws Exception {
+        Path legacy = directory.resolve("console-wallets.json");
+        FakeClient lostResponse = new FakeClient(call -> {
+            if (call.path.equals("/api/deposits")) throw new HttpTimeoutException("Synthetic accepted response lost");
+            return accounts(call, 100_000);
+        });
+        run(openAlice() + "2\n10000\n1\n\n0\n", lostResponse, legacy);
+        byte[] originalJournal = Files.readAllBytes(directory.resolve("console-requests.json"));
+        Call original = posts(lostResponse).get(0);
+
+        FakeClient recovered = new FakeClient(call -> switch (call.path) {
+            case "/api/deposits", "/api/payments/" + PAYMENT_ID -> payment("PENDING", false);
+            default -> accounts(call, 100_000);
+        });
+        String output = runProfile("6\n1\n1\n0\n0\n0\n", recovered, legacy, "alice");
+        Call retried = posts(recovered).get(0);
+        assertEquals(original.user, retried.user);
+        assertEquals(original.key, retried.key);
+        assertEquals(JSON.writeValueAsString(original.body), JSON.writeValueAsString(retried.body));
+        assertTrue(output.contains("Gửi lại CHÍNH lệnh cũ"));
+        JsonNode receipt = JSON.readTree(directory.resolve("console/alice/console-requests.json").toFile()).path("receipts").get(0);
+        assertEquals(PAYMENT_ID, receipt.path("id").asText());
+        assertEquals("alice", receipt.path("user").asText());
+        assertArrayEquals(originalJournal, Files.readAllBytes(directory.resolve("console-requests.json")));
+
+        runProfile("0\n", new FakeClient(call -> accounts(call, 100_000)), legacy, "bob");
+        JsonNode bob = JSON.readTree(directory.resolve("console/bob/console-requests.json").toFile());
+        assertTrue(bob.path("receipts").isEmpty());
+
+        FakeClient reopened = new FakeClient(call -> switch (call.path) {
+            case "/api/payments/" + PAYMENT_ID -> payment("COMPLETED", true);
+            default -> accounts(call, 110_000);
+        });
+        assertTrue(runProfile("6\n1\n\n0\n0\n", reopened, legacy, "alice").contains("HOÀN TẤT"));
+        assertTrue(posts(reopened).isEmpty());
+    }
+
+    @Test
+    void fixedAccountIgnoresSavedUserAndDoesNotOfferAccountSwitching(@TempDir Path directory) throws Exception {
+        Path legacy = directory.resolve("console-wallets.json");
+        FakeClient setup = new FakeClient(call -> accounts(call, 100_000));
+        run(openAlice() + "5\n5\n2\n0\n0\n", setup, legacy);
+        assertEquals("bob", JSON.readTree(legacy.toFile()).path("user").asText());
+
+        FakeClient alice = new FakeClient(call -> accounts(call, 123_456));
+        String output = runProfile("5\n5\n0\n0\n", alice, legacy, "alice");
+        assertTrue(output.contains("Người dùng: alice | Ví đang dùng: alice-ui"));
+        assertTrue(output.contains("Chọn một số từ 0 đến 4."));
+        assertFalse(output.contains("Đổi người dùng"));
+        assertTrue(alice.calls.stream().allMatch(call -> call.user.equals("alice")));
+        JsonNode selected = JSON.readTree(directory.resolve("console/alice/console-wallets.json").toFile()).path("selected");
+        assertEquals(1, selected.size());
+        assertEquals("alice-ui", selected.path("alice").asText());
+        assertThrows(IllegalArgumentException.class,
+                () -> runProfile("0\n", alice, legacy, "../../admin"));
+    }
+
+    @Test
+    void legacyImportPreservesKnownIdsAndNeverImportsPendingReceiptsTwice(@TempDir Path directory) throws Exception {
+        Path legacy = directory.resolve("console-wallets.json");
+        FakeClient setup = new FakeClient(call -> switch (call.path) {
+            case "/api/deposits", "/api/payments/" + PAYMENT_ID -> payment("PENDING", false);
+            default -> accounts(call, 100_000);
+        });
+        run(openAlice() + "2\n10000\n1\n0\n0\n", setup, legacy);
+        Path legacyJournal = directory.resolve("console-requests.json");
+        var saved = (com.fasterxml.jackson.databind.node.ObjectNode) JSON.readTree(legacyJournal.toFile());
+        var entries = (com.fasterxml.jackson.databind.node.ArrayNode) saved.path("receipts");
+        JsonNode original = entries.get(0).deepCopy();
+        var bobReceipt = (com.fasterxml.jackson.databind.node.ObjectNode) original.deepCopy();
+        bobReceipt.put("user", "bob");
+        bobReceipt.put("key", "33333333-3333-4333-8333-333333333333");
+        ((com.fasterxml.jackson.databind.node.ObjectNode) bobReceipt.path("body")).put("accountId", "bob-ui");
+        ((com.fasterxml.jackson.databind.node.ObjectNode) bobReceipt.path("data")).put("account_id", "bob-ui");
+        entries.add(bobReceipt);
+        JSON.writeValue(legacyJournal.toFile(), saved);
+        byte[] originalLegacy = Files.readAllBytes(legacyJournal);
+
+        FakeClient alice = new FakeClient(call -> accounts(call, 100_000));
+        runProfile("0\n", alice, legacy, "alice");
+        Path profileJournal = directory.resolve("console/alice/console-requests.json");
+        JsonNode migrated = JSON.readTree(profileJournal.toFile()).path("receipts");
+        assertEquals(1, migrated.size());
+        assertEquals(original, migrated.get(0));
+        assertTrue(posts(alice).isEmpty());
+
+        Files.delete(directory.resolve("console/alice/console-wallets.json"));
+        runProfile("0\n", alice, legacy, "alice");
+        assertEquals(migrated, JSON.readTree(profileJournal.toFile()).path("receipts"));
+        assertArrayEquals(originalLegacy, Files.readAllBytes(legacyJournal));
+
+        runProfile("0\n", new FakeClient(call -> accounts(call, 100_000)), legacy, "bob");
+        JsonNode bob = JSON.readTree(directory.resolve("console/bob/console-requests.json").toFile()).path("receipts");
+        assertEquals(1, bob.size());
+        assertEquals(bobReceipt, bob.get(0));
+    }
+
+    @Test
+    void corruptProfileJournalIsNotReplacedByValidLegacyData(@TempDir Path directory) throws Exception {
+        Path legacy = directory.resolve("console-wallets.json");
+        Path profileJournal = directory.resolve("console/alice/console-requests.json");
+        Files.createDirectories(profileJournal.getParent());
+        Files.writeString(profileJournal, "{not-json");
+        Files.writeString(directory.resolve("console-requests.json"), "{\"version\":1,\"receipts\":[]}");
+        FakeClient client = new FakeClient(call -> accounts(call, 100_000));
+
+        String output = runProfile(openAlice() + "2\n10000\n1\n\n0\n", client, legacy, "alice");
+
+        assertTrue(output.contains("Không đọc/khóa được file lệnh đã lưu"));
+        assertTrue(posts(client).isEmpty());
+        assertEquals("{not-json", Files.readString(profileJournal));
+        assertFalse(Files.exists(directory.resolve("console/alice/console-wallets.json")));
+    }
+
+    @Test
+    void corruptOrLockedLegacyJournalNeverBecomesAFreshFinancialSession(@TempDir Path directory) throws Exception {
+        Path legacy = directory.resolve("console-wallets.json");
+        Path journal = directory.resolve("console-requests.json");
+        Files.writeString(journal, "{not-json");
+        FakeClient client = new FakeClient(call -> accounts(call, 100_000));
+        String corrupt = runProfile(openAlice() + "2\n10000\n1\n\n0\n", client, legacy, "alice");
+        assertTrue(corrupt.contains("Chưa khôi phục an toàn được lệnh cũ"));
+        assertTrue(posts(client).isEmpty());
+        assertEquals("{not-json", Files.readString(journal));
+        assertFalse(Files.exists(directory.resolve("console/alice/console-requests.json")));
+
+        Files.writeString(journal, "{\"version\":1,\"receipts\":[]}");
+        try (Scanner scanner = new Scanner("0\n"); PrintStream stream = new PrintStream(new ByteArrayOutputStream())) {
+            WalletConsole previous = new WalletConsole(scanner, stream, client, legacy);
+            try {
+                String locked = runProfile(openAlice() + "2\n10000\n1\n\n0\n", client, legacy, "alice");
+                assertTrue(locked.contains("Chưa khôi phục an toàn được lệnh cũ"));
+                assertTrue(posts(client).isEmpty());
+            } finally { previous.run(); }
+        }
+    }
+
     private static String openAlice() { return "5\n2\n1\nalice-ui\n0\n"; }
 
     private static String run(String input, FakeClient client) {
@@ -462,6 +628,14 @@ class WalletConsoleTest {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         try (Scanner scanner = new Scanner(input); PrintStream stream = new PrintStream(output, true, StandardCharsets.UTF_8)) {
             new WalletConsole(scanner, stream, client, bookmarks).run();
+        }
+        return output.toString(StandardCharsets.UTF_8);
+    }
+
+    private static String runProfile(String input, FakeClient client, Path legacyBookmarks, String identity) {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        try (Scanner scanner = new Scanner(input); PrintStream stream = new PrintStream(output, true, StandardCharsets.UTF_8)) {
+            new WalletConsole(scanner, stream, client, legacyBookmarks, identity).run();
         }
         return output.toString(StandardCharsets.UTF_8);
     }

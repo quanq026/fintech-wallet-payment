@@ -23,6 +23,8 @@ public class WalletConsole {
     private final ConsoleDisplay display;
     private final Path bookmarks;
     private final Path receiptFile;
+    private final String fixedUser;
+    private final LiveConsoleMonitor liveMonitor;
     private final ObjectMapper json = new ObjectMapper();
     private final Map<String, JsonNode> wallets = new LinkedHashMap<>();
     private final Map<String, String> selectedWallets = new HashMap<>();
@@ -31,28 +33,47 @@ public class WalletConsole {
     private boolean receiptStoreReady = true;
     private FileChannel receiptLockChannel;
     private FileLock receiptLock;
+    private boolean liveInput;
 
     public WalletConsole(Scanner input, PrintStream out, WalletApiClient client) {
-        this(input, out, client, bookmarkFile());
+        this(input, out, client, bookmarkFile(), "alice");
     }
 
     public WalletConsole(Scanner input, PrintStream out, WalletApiClient client, Path bookmarks) {
+        this(input, out, client, bookmarks, null, null);
+    }
+
+    public WalletConsole(Scanner input, PrintStream out, WalletApiClient client, Path legacyBookmarks, String identity) {
+        this(input, out, client, profileBookmarks(legacyBookmarks, identity), InputRules.client(identity), legacyBookmarks);
+    }
+
+    private WalletConsole(Scanner input, PrintStream out, WalletApiClient client, Path bookmarks,
+                          String identity, Path legacyBookmarks) {
         this.input = input;
         this.out = out;
         this.client = client;
         this.display = new ConsoleDisplay(out);
         this.bookmarks = bookmarks;
         this.receiptFile = bookmarks == null ? null : bookmarks.resolveSibling("console-requests.json");
+        this.fixedUser = identity;
+        this.liveMonitor = identity == null ? null : new LiveConsoleMonitor(client, out);
         loadBookmarks();
+        if (identity != null) user = identity;
         loadReceipts();
+        if (legacyBookmarks != null && receiptStoreReady) importLegacy(legacyBookmarks);
     }
 
     public static void main(String[] args) {
+        if (args.length > 1 || (args.length == 1 && !Set.of("alice", "bob", "admin").contains(args[0]))) {
+            System.err.println("Tài khoản cần là alice, bob hoặc admin.");
+            return;
+        }
         new WalletConsole(new Scanner(System.in, java.nio.charset.StandardCharsets.UTF_8),
-                System.out, new WalletApiClient(), bookmarkFile()).run();
+                System.out, new WalletApiClient(), bookmarkFile(), args.length == 0 ? "alice" : args[0]).run();
     }
 
     public void run() {
+        if (liveMonitor != null) liveMonitor.start();
         try {
             while (true) {
                 display.title("FINTECH WALLET | Ví điện tử");
@@ -64,11 +85,16 @@ public class WalletConsole {
                 out.println("2. Nạp tiền                 Nạp thêm tiền vào ví");
                 out.println("3. Chuyển tiền              Gửi tiền sang ví người khác");
                 out.println("4. Thanh toán / rút tiền    Trả cho cửa hàng hoặc rút về ngân hàng");
-                out.println("5. Ví & người dùng          Số dư, tạo/chọn ví, đổi Alice/Bob/admin");
+                out.println(fixedUser == null ? "5. Ví & người dùng          Số dư, tạo/chọn ví, đổi Alice/Bob/admin"
+                        : "5. Ví của tôi              Số dư, tạo/chọn ví và lịch sử");
                 out.println("6. Giao dịch & thông báo    Xem kết quả, tiếp tục lệnh đang chờ");
                 if (user.equals("admin")) out.println("7. Quản trị                 Đối soát, cảnh báo và quản lý cửa hàng");
                 out.println("0. Thoát");
-                int choice = choice(user.equals("admin") ? 7 : 6);
+                if (liveMonitor != null) out.println("Số dư ví tự cập nhật mỗi 2 giây khi chờ tại menu này.");
+                int choice;
+                liveInput = true;
+                try { choice = choice(user.equals("admin") ? 7 : 6); }
+                finally { liveInput = false; }
                 if (choice == 0) break;
                 perform(() -> {
                     switch (choice) {
@@ -85,6 +111,7 @@ public class WalletConsole {
         } catch (EndOfInput ignored) {
             out.println("\nĐã hết dữ liệu nhập.");
         } finally {
+            if (liveMonitor != null) liveMonitor.close();
             closeReceiptStore();
         }
         out.println("Đã đóng console.");
@@ -92,9 +119,16 @@ public class WalletConsole {
 
     private void overview() throws Exception {
         display.title("TỔNG QUAN VÍ | " + user);
-        if (selectedWallets.containsKey(user)) display.account(currentAccount());
+        if (selectedWallets.containsKey(user)) {
+            JsonNode account = currentAccount();
+            display.account(account);
+            if (liveMonitor != null)
+                liveMonitor.seedBalance(user, text(account, "accountId"), account.path("balance").longValue());
+        }
         else out.println("Chưa chọn ví. Mở 'Ví & người dùng' để tạo hoặc chọn ví.");
-        pause();
+        liveInput = true;
+        try { pause(); }
+        finally { liveInput = false; }
     }
 
     private void walletMenu() {
@@ -102,8 +136,10 @@ public class WalletConsole {
             display.title("VÍ & NGƯỜI DÙNG | " + user);
             String selected = selectedWallets.get(user);
             out.println(selected == null ? "Chưa chọn ví. Tạo ví mới hoặc mở ví đã có." : "Ví đang dùng: " + selected);
-            int option = menu("Tạo ví cá nhân", "Mở / chọn ví đã có", "Xem số dư ví đang dùng",
-                    "Xem tiền vào / ra ví", "Đổi người dùng");
+            String[] items = fixedUser == null
+                    ? new String[]{"Tạo ví cá nhân", "Mở / chọn ví đã có", "Xem số dư ví đang dùng", "Xem tiền vào / ra ví", "Đổi người dùng"}
+                    : new String[]{"Tạo ví cá nhân", "Mở / chọn ví đã có", "Xem số dư ví đang dùng", "Xem tiền vào / ra ví"};
+            int option = menu(items);
             if (option == 0) return;
             perform(() -> {
                 switch (option) {
@@ -181,6 +217,8 @@ public class WalletConsole {
             if (response.successful()) {
                 rememberWallet(response.body());
                 out.println("Số dư hiện tại: " + money(response.body().path("balance").asLong()));
+                if (liveMonitor != null)
+                    liveMonitor.seedBalance(user, id, response.body().path("balance").longValue());
             } else {
                 out.println("Chưa xem được số dư. Mở 'Ví & người dùng' để chọn lại hoặc kiểm tra ví.");
             }
@@ -195,11 +233,54 @@ public class WalletConsole {
         return (root == null ? Path.of("").toAbsolutePath() : root).resolve("work/console-wallets.json");
     }
 
+    private static Path profileBookmarks(Path legacyBookmarks, String identity) {
+        InputRules.client(identity);
+        Objects.requireNonNull(legacyBookmarks, "Console storage path is required");
+        return legacyBookmarks.resolveSibling("console").resolve(identity).resolve("console-wallets.json");
+    }
+
+    private void importLegacy(Path legacyBookmarks) {
+        if (Files.exists(receiptFile) && Files.exists(bookmarks)) return;
+        Path legacyRequests = legacyBookmarks.resolveSibling("console-requests.json");
+        Path legacyLock = legacyBookmarks.resolveSibling("console-requests.lock");
+        try (FileChannel channel = FileChannel.open(legacyLock, StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
+            FileLock lock = null;
+            for (int attempt = 0; attempt < 40 && lock == null; attempt++) {
+                try { lock = channel.tryLock(); }
+                catch (java.nio.channels.OverlappingFileLockException ignored) { }
+                if (lock == null) Thread.sleep(50);
+            }
+            if (lock == null) throw new IOException("The previous console is still open");
+            try {
+                if (!Files.exists(receiptFile)) {
+                    receipts.addAll(readReceipts(legacyRequests).stream().filter(receipt -> receipt.user.equals(user)).toList());
+                    saveReceipts();
+                }
+                if (!Files.exists(bookmarks)) {
+                    loadBookmarks(legacyBookmarks);
+                    user = fixedUser;
+                    saveBookmarks();
+                }
+            } finally { lock.release(); }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            receiptStoreReady = false;
+            out.println("Chưa khôi phục xong lệnh cũ. Đã khóa gửi tiền; đóng console cũ rồi mở lại.");
+        } catch (IOException | RuntimeException error) {
+            receiptStoreReady = false;
+            out.println("Chưa khôi phục an toàn được lệnh cũ. Đã khóa gửi tiền; giữ dữ liệu và đóng console cũ trước khi mở lại.");
+        }
+    }
+
     private void loadBookmarks() {
-        if (bookmarks == null || !Files.isRegularFile(bookmarks)) return;
+        loadBookmarks(bookmarks);
+    }
+
+    private void loadBookmarks(Path source) {
+        if (source == null || !Files.isRegularFile(source)) return;
         try {
-            if (Files.size(bookmarks) > 262144) throw new IOException("Bookmark file too large");
-            JsonNode saved = json.readTree(bookmarks.toFile());
+            if (Files.size(source) > 262144) throw new IOException("Bookmark file too large");
+            JsonNode saved = json.readTree(source.toFile());
             for (JsonNode wallet : saved.path("wallets")) {
                 InputRules.identifier(text(wallet, "accountId"));
                 InputRules.client(text(wallet, "ownerId"));
@@ -207,6 +288,7 @@ public class WalletConsole {
                 rememberWallet(wallet);
             }
             for (String owner : List.of("alice", "bob", "admin")) {
+                if (fixedUser != null && !owner.equals(fixedUser)) continue;
                 String id = text(saved.path("selected"), owner);
                 if (wallets.containsKey(id) && (owner.equals("admin") || text(wallets.get(id), "ownerId").equals(owner)))
                     selectedWallets.put(owner, id);
@@ -221,6 +303,7 @@ public class WalletConsole {
 
     private void saveBookmarks() {
         if (bookmarks == null) return;
+        if (fixedUser != null && (!receiptStoreReady || receiptLock == null || !receiptLock.isValid())) return;
         Path temporary = null;
         try {
             var known = wallets.values().stream().map(w -> Map.of("accountId", text(w, "accountId"),
@@ -245,30 +328,37 @@ public class WalletConsole {
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE);
             receiptLock = receiptLockChannel.tryLock();
             if (receiptLock == null) throw new IOException("Console request store is already open");
-            if (!Files.exists(receiptFile)) return;
-            if (!Files.isRegularFile(receiptFile) || Files.size(receiptFile) > 1_048_576)
-                throw new IOException("Invalid console request store");
-            ObjectMapper reader = new ObjectMapper()
-                    .enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
-                    .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
-            JsonNode saved = reader.readTree(receiptFile.toFile());
-            if (saved == null || !saved.isObject() || saved.size() != 2 || !saved.path("version").isInt() || saved.path("version").intValue() != 1
-                    || !saved.path("receipts").isArray() || saved.path("receipts").size() > 1000)
-                throw new IOException("Invalid console request store");
-            List<Receipt> restored = new ArrayList<>();
-            Set<String> keys = new HashSet<>();
-            for (JsonNode entry : saved.path("receipts")) {
-                Receipt receipt = readReceipt(entry);
-                if (receipt.key != null && !keys.add(receipt.user + ":" + receipt.key))
-                    throw new IOException("Duplicate console request key");
-                restored.add(receipt);
-            }
+            List<Receipt> restored = readReceipts(receiptFile);
+            if (fixedUser != null && restored.stream().anyMatch(receipt -> !receipt.user.equals(fixedUser)))
+                throw new IOException("Receipt belongs to a different console account");
             receipts.addAll(restored);
         } catch (Exception ignored) {
             receiptStoreReady = false;
             out.println("Không đọc/khóa được file lệnh đã lưu. Đã khóa gửi tiền để tránh giao dịch trùng.");
             out.println("Giữ nguyên work/console-requests.json để kiểm tra; nếu console khác đang mở, hãy đóng rồi chạy lại.");
         }
+    }
+
+    private List<Receipt> readReceipts(Path source) throws IOException {
+        if (!Files.exists(source)) return List.of();
+        if (!Files.isRegularFile(source) || Files.size(source) > 1_048_576)
+            throw new IOException("Invalid console request store");
+        ObjectMapper reader = new ObjectMapper()
+                .enable(com.fasterxml.jackson.core.JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
+                .enable(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+        JsonNode saved = reader.readTree(source.toFile());
+        if (saved == null || !saved.isObject() || saved.size() != 2 || !saved.path("version").isInt() || saved.path("version").intValue() != 1
+                || !saved.path("receipts").isArray() || saved.path("receipts").size() > 1000)
+            throw new IOException("Invalid console request store");
+        List<Receipt> restored = new ArrayList<>();
+        Set<String> keys = new HashSet<>();
+        for (JsonNode entry : saved.path("receipts")) {
+            Receipt receipt = readReceipt(entry);
+            if (receipt.key != null && !keys.add(receipt.user + ":" + receipt.key))
+                throw new IOException("Duplicate console request key");
+            restored.add(receipt);
+        }
+        return restored;
     }
 
     private Receipt readReceipt(JsonNode entry) throws IOException {
@@ -715,9 +805,19 @@ public class WalletConsole {
     }
 
     private String read(String prompt) {
-        out.print(prompt + " > ");
-        if (!input.hasNextLine()) throw new EndOfInput();
-        return input.nextLine().trim();
+        synchronized (out) {
+            out.print(prompt + " > ");
+            out.flush();
+            if (liveMonitor != null)
+                liveMonitor.setContext(user, selectedWallets.get(user), prompt + " > ", liveInput);
+        }
+        try {
+            if (!input.hasNextLine()) throw new EndOfInput();
+            return input.nextLine().trim();
+        } finally {
+            if (liveMonitor != null)
+                liveMonitor.setContext(user, selectedWallets.get(user), "", false);
+        }
     }
 
     private String form(String prompt, String defaultValue) {
