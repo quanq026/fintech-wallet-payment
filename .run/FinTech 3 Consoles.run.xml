@@ -1,10 +1,14 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="FinTech 3 Consoles" type="CompoundRunConfigurationType">
-    <toRun name="FinTech Alice" type="Application" />
-    <toRun name="FinTech Bob" type="Application" />
-    <toRun name="FinTech Admin" type="Application" />
-    <method v="2">
-      <option name="Gradle.BeforeRunTask" enabled="true" tasks="prepareLocal" externalProjectPath="$PROJECT_DIR$" />
-    </method>
+  <configuration default="false" name="FinTech 3 Consoles" type="GradleRunConfiguration" factoryName="Gradle">
+    <ExternalSystemSettings>
+      <option name="externalProjectPath" value="$PROJECT_DIR$" />
+      <option name="externalSystemIdString" value="GRADLE" />
+      <option name="taskNames">
+        <list>
+          <option value="openConsoles" />
+        </list>
+      </option>
+    </ExternalSystemSettings>
+    <method v="2" />
   </configuration>
 </component>

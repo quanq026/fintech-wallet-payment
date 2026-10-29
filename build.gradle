@@ -54,3 +54,11 @@ tasks.register('prepareLocal', Exec) {
     commandLine 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
             '-File', file('scripts/start-local.ps1').absolutePath
 }
+
+tasks.register('openConsoles', Exec) {
+    group = 'local'
+    description = 'Start the backend once and open Alice, Bob and Admin consoles.'
+    dependsOn 'prepareLocal', ':console-client:installDist'
+    commandLine 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+            '-File', file('scripts/console.ps1').absolutePath, '-All'
+}
